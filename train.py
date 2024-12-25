@@ -14,6 +14,8 @@ from torch.cuda.amp import GradScaler, autocast
 from torchvision.datasets import ImageFolder
 from logging.handlers import RotatingFileHandler
 import time
+from datasets import load_dataset
+import numpy as np
 
 # Add rotating file handler
 rotating_handler = RotatingFileHandler("training.log", maxBytes=5_000_000, backupCount=5)  # 5 MB per log
@@ -30,86 +32,35 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.addHandler(rotating_handler)
 
-class ImageNetSubsetDataset(Dataset):
-
-    def __init__(self, root_dir, transform=None, is_train=True):
+class ImageNetDataset(Dataset):
+    def __init__(self, transform=None, is_train=True):
         self.transform = transform
-        self.image_paths = []
-        self.labels = []
         
-        logger.info(f"Initializing dataset with root_dir: {root_dir}")
+        # Load the ImageNet dataset from HuggingFace
+        logger.info("Loading ImageNet dataset from HuggingFace...")
+        self.dataset = load_dataset(
+            'imagenet-1k',
+            split='train' if is_train else 'validation',
+            cache_dir='/home/ubuntu/.cache/huggingface/datasets'
+        )
         
-        # For training, collect images from train.X1 to train.X4 and their subfolders
-        if is_train:
-            logger.info("Loading training data:")
-            for i in range(1, 5):
-                main_folder = os.path.join(root_dir, f'train.X{i}')
-                logger.info(f"Checking directory: {main_folder}")
-                
-                if not os.path.exists(main_folder):
-                    logger.warning(f"Folder not found - {main_folder}")
-                    continue
-                    
-                # Walk through all subfolders
-                for root, dirs, files in os.walk(main_folder):
-                    logger.info(f"Scanning directory: {root}")
-                    jpeg_files = [f for f in files if f.endswith('.JPEG')]
-                    if jpeg_files:
-                        logger.info(f"Found {len(jpeg_files)} images in {root}")
-                        self.image_paths.extend([os.path.join(root, f) for f in jpeg_files])
-        else:
-            logger.info("Loading validation data:")
-            val_folder = os.path.join(root_dir, 'val.X')
-            logger.info(f"Checking directory: {val_folder}")
-            
-            if not os.path.exists(val_folder):
-                logger.warning(f"Folder not found - {val_folder}")
-            else:
-                # Walk through all subfolders in val.X
-                for root, dirs, files in os.walk(val_folder):
-                    logger.info(f"Scanning directory: {root}")
-                    jpeg_files = [f for f in files if f.endswith('.JPEG')]
-                    if jpeg_files:
-                        logger.info(f"Found {len(jpeg_files)} images in {root}")
-                        self.image_paths.extend([os.path.join(root, f) for f in jpeg_files])
+        logger.info(f"Dataset loaded with {len(self.dataset)} samples")
         
-        if len(self.image_paths) == 0:
-            logger.error("No images found in the dataset!")
-            raise ValueError("Dataset is empty.")
-
-        logger.info(f"Total images found: {len(self.image_paths)}")
-        
-        # Extract labels from filenames
-        for path in self.image_paths:
-            label = os.path.basename(os.path.dirname(path))
-            self.labels.append(label)
-        
-        unique_labels = sorted(list(set(self.labels)))
-        logger.info(f"Number of unique classes: {len(unique_labels)}")
-        self.label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
-        self.labels = [self.label_to_idx[label] for label in self.labels]
-
-
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.dataset)
 
     def __getitem__(self, idx):
-        max_retries = 3
-        for retry in range(max_retries):
-            try:
-                image_path = self.image_paths[idx]
-                image = Image.open(image_path).convert('RGB')
-                label = self.labels[idx]
-
-                if self.transform:
-                    image = self.transform(image)
-
-                return image, label
-            except Exception as e:
-                if retry == max_retries - 1:
-                    logger.error(f"Failed to load image {image_path} after {max_retries} attempts: {e}")
-                    raise
-                time.sleep(0.1)
+        # Get sample from the HuggingFace dataset
+        sample = self.dataset[idx]
+        
+        # Convert image from PIL to tensor and apply transforms
+        image = sample['image']  # Already a PIL Image
+        label = sample['label']  # Integer label
+        
+        if self.transform:
+            image = self.transform(image)
+            
+        return image, label
 
 class Trainer:
     
@@ -134,8 +85,8 @@ class Trainer:
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-        # Initialize model
-        self.model = ImageNetModel(num_classes=100, pretrained=True).to(self.device)
+        # Initialize model with 1000 classes for full ImageNet
+        self.model = ImageNetModel(num_classes=1000, pretrained=True).to(self.device)
 
         # Loss and optimizer with simple parameters
         self.criterion = nn.CrossEntropyLoss()
@@ -225,15 +176,13 @@ class Trainer:
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-        # Use ImageNetSubsetDataset instead of ImageFolder
-        self.train_dataset = ImageNetSubsetDataset(
-            root_dir=self.config['data_dir'],
+        # Use the new ImageNetDataset class
+        self.train_dataset = ImageNetDataset(
             transform=train_transform,
             is_train=True
         )
         
-        self.val_dataset = ImageNetSubsetDataset(
-            root_dir=self.config['data_dir'],
+        self.val_dataset = ImageNetDataset(
             transform=val_transform,
             is_train=False
         )
