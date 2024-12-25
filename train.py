@@ -66,13 +66,11 @@ class Trainer:
     
     def __init__(self, config):
         self.config = config
-
-        # Check if data directory exists
-        if not os.path.exists(config['data_dir']):
-            logger.error(f"Data directory not found: {config['data_dir']}")
-            raise ValueError("Data directory does not exist.")
-
-        logger.info(f"Using data directory: {os.path.abspath(config['data_dir'])}")
+        logger.info("Initializing trainer...")
+        
+        # No need to check data directory since we're using HuggingFace datasets
+        logger.info("Using HuggingFace datasets for ImageNet")
+        
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.start_epoch = 0
         self.best_acc = 0
@@ -91,7 +89,7 @@ class Trainer:
         # Loss and optimizer with simple parameters
         self.criterion = nn.CrossEntropyLoss()
         
-        # Initialize basic SGD optimizer without momentum
+        # Initialize basic Adam optimizer
         self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=config['learning_rate'],
