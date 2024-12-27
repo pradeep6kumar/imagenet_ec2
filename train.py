@@ -19,6 +19,8 @@ import numpy as np
 import pickle
 from torch_lr_finder import LRFinder
 import matplotlib.pyplot as plt
+import psutil
+import GPUtil
 
 # Add rotating file handler
 rotating_handler = RotatingFileHandler("training.log", maxBytes=5_000_000, backupCount=5)  # 5 MB per log
@@ -256,6 +258,11 @@ class Trainer:
         total = 0
         scaler = GradScaler()
 
+        # Add GPU monitoring
+        logger.info(f"GPU Memory before training:")
+        logger.info(f"Allocated: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
+        logger.info(f"Cached: {torch.cuda.memory_reserved(0) / 1024**2:.2f} MB")
+
         logger.info("Starting training epoch...")
         for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader)):
             images, labels = images.to(self.device), labels.to(self.device)
@@ -385,11 +392,16 @@ class Trainer:
 
     
     def train(self):
+        total_start_time = time.time()
+        samples_processed = 0
+        
         logger.info(f"Training on device: {self.device}")
         logger.info(f"Training configuration: {self.config}")
         
         try:
             for epoch in range(self.start_epoch, self.config['epochs']):
+                epoch_start_time = time.time()
+                
                 logger.info(f"Epoch: {epoch + 1}/{self.config['epochs']}")
                 
                 try:
@@ -419,6 +431,15 @@ class Trainer:
                 if self.early_stopping_counter >= self.patience:
                     logger.info(f"Early stopping triggered after {epoch + 1} epochs")
                     break
+                
+                samples_processed += len(self.train_loader.dataset)
+                elapsed_time = time.time() - total_start_time
+                samples_per_second = samples_processed / elapsed_time
+                
+                logger.info(f"\nTraining Speed Stats:")
+                logger.info(f"Samples/second: {samples_per_second:.2f}")
+                logger.info(f"Time/epoch: {(time.time() - epoch_start_time) / 3600:.2f} hours")
+                logger.info(f"Estimated total time: {(self.config['epochs'] - epoch) * (time.time() - epoch_start_time) / 3600:.2f} hours")
                 
         except Exception as e:
             logger.error(f"Training failed with error: {e}")
@@ -548,6 +569,23 @@ class Trainer:
         checkpoint_path = os.path.join(self.config['checkpoint_dir'], 'last_checkpoint.pth')
         lr_finder_path = os.path.join(self.plots_dir, 'lr_finder.png')
         return not (os.path.exists(checkpoint_path) or os.path.exists(lr_finder_path))
+
+    def log_system_stats(self):
+        """Log system resource utilization"""
+        # CPU Usage
+        cpu_usage = psutil.cpu_percent(interval=1)
+        ram_usage = psutil.virtual_memory().percent
+        
+        # GPU Usage
+        gpus = GPUtil.getGPUs()
+        gpu_usage = gpus[0].load * 100 if gpus else 0
+        gpu_memory = gpus[0].memoryUsed if gpus else 0
+        
+        logger.info(f"\nSystem Stats:")
+        logger.info(f"CPU Usage: {cpu_usage}%")
+        logger.info(f"RAM Usage: {ram_usage}%")
+        logger.info(f"GPU Usage: {gpu_usage:.1f}%")
+        logger.info(f"GPU Memory: {gpu_memory} MB")
 
 
 
