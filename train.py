@@ -254,14 +254,14 @@ class Trainer:
         total_loss = 0
         correct = 0
         total = 0
-        scaler = GradScaler('cuda')
+        scaler = GradScaler()
 
         logger.info("Starting training epoch...")
         for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader)):
             images, labels = images.to(self.device), labels.to(self.device)
 
             self.optimizer.zero_grad()
-            with autocast('cuda'):
+            with autocast(device_type='cuda', enabled=True):
                 outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
 
