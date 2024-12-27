@@ -17,6 +17,8 @@ import time
 from datasets import load_dataset
 import numpy as np
 import pickle
+from torch_lr_finder import LRFinder
+import matplotlib.pyplot as plt
 
 # Add rotating file handler
 rotating_handler = RotatingFileHandler("training.log", maxBytes=5_000_000, backupCount=5)  # 5 MB per log
@@ -114,30 +116,47 @@ class Trainer:
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-        # Initialize model with 1000 classes for full ImageNet
-        self.model = ImageNetModel(num_classes=1000, pretrained=True).to(self.device)
+        # 1. Setup data first
+        self.setup_data()
+        logger.info("Data loaders initialized")
 
-        # Loss and optimizer with simple parameters
-        self.criterion = nn.CrossEntropyLoss()
-        
-        # Initialize basic Adam optimizer
+        # 2. Initialize model and optimizer
+        self.model = ImageNetModel(num_classes=1000, pretrained=True).to(self.device)
         self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=config['learning_rate'],
             weight_decay=1e-4
         )
+        logger.info("Model and optimizer initialized")
 
-        # Setup data first to get loader length
-        self.setup_data()
+        # 3. Load checkpoint - This will update model, optimizer, and epoch states
+        self.load_checkpoint()
+        logger.info(f"Starting from epoch {self.start_epoch}")
 
-        # Use a simpler scheduler
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        # 4. Initialize scheduler with remaining steps
+        steps_per_epoch = len(self.train_loader)
+        remaining_epochs = config['epochs'] - self.start_epoch
+        total_steps = steps_per_epoch * remaining_epochs
+        
+        logger.info(f"Initializing OneCycleLR scheduler:")
+        logger.info(f"- Steps per epoch: {steps_per_epoch}")
+        logger.info(f"- Remaining epochs: {remaining_epochs}")
+        logger.info(f"- Total remaining steps: {total_steps}")
+        
+        if total_steps <= 0:
+            raise ValueError(f"No training steps remaining. Current epoch {self.start_epoch} >= max epochs {config['epochs']}")
+        
+        # Initialize OneCycleLR scheduler with remaining steps
+        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
             self.optimizer,
-            mode='max',
-            factor=0.1,
-            patience=5,
-            verbose=True
+            max_lr=config['learning_rate'] * 10,
+            total_steps=total_steps,
+            pct_start=0.3,
+            div_factor=25,
+            final_div_factor=1e4,
+            anneal_strategy='cos'
         )
+        logger.info("Scheduler initialized")
 
         # Initialize async checkpoint saving
         self.checkpoint_queue = asyncio.Queue()
@@ -147,9 +166,6 @@ class Trainer:
             daemon=True
         )
         self.checkpoint_worker.start()
-
-        # Load checkpoint if exists
-        self.load_checkpoint()
 
         # Training parameters
         self.grad_clip_value = 1.0
@@ -163,6 +179,9 @@ class Trainer:
         self.train_accs = []
         self.val_accs = []
         
+        self.plots_dir = os.path.join('/home/ubuntu/imagenet_ec2', 'plots')
+        os.makedirs(self.plots_dir, exist_ok=True)
+
     def _run_checkpoint_worker(self):
         """Run the checkpoint worker in its own thread with its own event loop"""
         asyncio.set_event_loop(self.loop)
@@ -259,13 +278,17 @@ class Trainer:
             scaler.step(self.optimizer)
             scaler.update()
 
+            # Step the scheduler after each batch
+            self.scheduler.step()
+
             total_loss += loss.item()
             _, predicted = outputs.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
 
             if batch_idx % 100 == 0:
-                logger.info(f"Batch {batch_idx}: Loss = {loss.item():.4f}")
+                current_lr = self.scheduler.get_last_lr()[0]
+                logger.info(f"Batch {batch_idx}: Loss = {loss.item():.4f}, LR = {current_lr:.6f}")
 
         return total_loss / len(self.train_loader), 100. * correct / total
     
@@ -276,7 +299,6 @@ class Trainer:
         total_loss = 0
         correct = 0
         total = 0
-        top5_correct = 0
 
         logger.info("Starting validation...")
         with torch.no_grad():
@@ -286,18 +308,19 @@ class Trainer:
                 loss = self.criterion(outputs, labels)
 
                 total_loss += loss.item()
-                _, predicted = outputs.topk(5, dim=1)  # Top-5 predictions
+                _, predicted = outputs.max(1)  # Only get top-1 prediction
                 total += labels.size(0)
-                correct += (predicted[:, 0] == labels).sum().item()
-                top5_correct += torch.sum(torch.any(predicted == labels.unsqueeze(1), dim=1)).item()
+                correct += predicted.eq(labels).sum().item()
 
                 if batch_idx % 100 == 0:
                     logger.info(f"Validation Progress: Batch {batch_idx}/{len(self.val_loader)}")
 
-        top5_acc = 100. * top5_correct / total
-        logger.info(f"Validation completed. Avg Loss = {total_loss / len(self.val_loader):.4f}, Top-1 Accuracy = {100. * correct / total:.2f}%, Top-5 Accuracy = {top5_acc:.2f}%")
-        torch.cuda.empty_cache()  # Add memory cleanup after validation
-        return total_loss / len(self.val_loader), 100. * correct / total
+        accuracy = 100. * correct / total
+        logger.info(f"Validation completed. Avg Loss = {total_loss / len(self.val_loader):.4f}, "
+                    f"Top-1 Accuracy = {accuracy:.2f}%")
+        
+        torch.cuda.empty_cache()
+        return total_loss / len(self.val_loader), accuracy
 
 
     def save_checkpoint(self, epoch, is_best=False):
@@ -364,6 +387,8 @@ class Trainer:
                 logger.error(f"Failed to load checkpoint: {e}")
         else:
             logger.info("No existing checkpoint found. Starting training from scratch.")
+            self.start_epoch = 0
+            self.best_acc = 0
 
     
     def train(self):
@@ -420,9 +445,6 @@ class Trainer:
         self.train_accs.append(train_acc)
         self.val_accs.append(val_acc)
         
-        # Update scheduler with validation accuracy
-        self.scheduler.step(val_acc)
-        
         # Log learning rate
         current_lr = self.optimizer.param_groups[0]['lr']
         logger.info(f"Current learning rate: {current_lr:.6f}")
@@ -437,6 +459,102 @@ class Trainer:
             self.save_checkpoint(epoch, is_best=True)
         else:
             self.early_stopping_counter += 1
+
+        # Plot progress after updating metrics
+        self.plot_training_progress()
+
+    def find_lr(self, num_iter=100):
+        """Find optimal learning rate using LR Finder"""
+        logger.info("Starting learning rate finder...")
+        
+        # Create a copy of the model for LR finding
+        model_copy = ImageNetModel(num_classes=1000, pretrained=True).to(self.device)
+        model_copy.load_state_dict(self.model.state_dict())
+        
+        optimizer = optim.Adam(
+            model_copy.parameters(),
+            lr=1e-7,  # Start with a very low learning rate
+            weight_decay=self.config['weight_decay']
+        )
+        
+        lr_finder = LRFinder(model_copy, optimizer, self.criterion, device=self.device)
+        
+        try:
+            lr_finder.range_test(
+                self.train_loader,
+                end_lr=10,  # End with a high learning rate
+                num_iter=num_iter,
+                step_mode="exp",
+                diverge_th=5,
+            )
+            
+            # Plot the learning rate finder results
+            fig, ax = plt.subplots(figsize=(10, 6))
+            lr_finder.plot()
+            plt.title('Learning Rate Finder Results')
+            plt.xlabel('Learning Rate')
+            plt.ylabel('Loss')
+            plt.grid(True)
+            
+            # Save the plot
+            plot_path = os.path.join(self.plots_dir, 'lr_finder.png')
+            plt.savefig(plot_path)
+            plt.close()
+            
+            # Get suggestion for learning rate
+            suggested_lr = lr_finder.suggestion()
+            logger.info(f"Suggested learning rate: {suggested_lr:.6f}")
+            
+            # Save learning rate history
+            history_path = os.path.join(self.plots_dir, 'lr_finder_history.txt')
+            with open(history_path, 'w') as f:
+                f.write(f"Suggested LR: {suggested_lr}\n")
+                f.write("History:\n")
+                for lr, loss in zip(lr_finder.history['lr'], lr_finder.history['loss']):
+                    f.write(f"LR: {lr:.8f}, Loss: {loss:.8f}\n")
+            
+            return suggested_lr
+            
+        except Exception as e:
+            logger.error(f"Error during LR finding: {e}")
+            raise
+        finally:
+            # Clean up
+            del model_copy
+            torch.cuda.empty_cache()
+
+    def plot_training_progress(self):
+        """Plot training and validation metrics"""
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12))
+        
+        # Plot losses
+        ax1.plot(self.train_losses, label='Train Loss')
+        ax1.plot(self.val_losses, label='Val Loss')
+        ax1.set_title('Training and Validation Loss')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Loss')
+        ax1.legend()
+        ax1.grid(True)
+        
+        # Plot accuracies
+        ax2.plot(self.train_accs, label='Train Acc')
+        ax2.plot(self.val_accs, label='Val Acc')
+        ax2.set_title('Training and Validation Accuracy')
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Accuracy (%)')
+        ax2.legend()
+        ax2.grid(True)
+        
+        plt.tight_layout()
+        plot_path = os.path.join(self.plots_dir, f'training_progress_epoch_{len(self.train_losses)}.png')
+        plt.savefig(plot_path)
+        plt.close()
+
+    def is_fresh_training(self):
+        """Check if this is a fresh training run"""
+        checkpoint_path = os.path.join(self.config['checkpoint_dir'], 'last_checkpoint.pth')
+        lr_finder_path = os.path.join(self.plots_dir, 'lr_finder.png')
+        return not (os.path.exists(checkpoint_path) or os.path.exists(lr_finder_path))
 
 
 
@@ -465,12 +583,30 @@ if __name__ == '__main__':
     
     try:
         trainer = Trainer(config)
+        
+        # Check if this is a fresh training run
+        if trainer.is_fresh_training():
+            logger.info("Fresh training detected. Running learning rate finder...")
+            try:
+                suggested_lr = trainer.find_lr(num_iter=100)
+                config['learning_rate'] = suggested_lr
+                logger.info(f"Using suggested learning rate: {suggested_lr}")
+                
+                # Reinitialize trainer with new learning rate
+                del trainer
+                torch.cuda.empty_cache()
+                trainer = Trainer(config)
+            except Exception as e:
+                logger.error(f"LR finder failed: {e}. Using default learning rate.")
+        else:
+            logger.info("Resuming training from checkpoint. Skipping LR finder.")
+        
         trainer.train()
     except KeyboardInterrupt:
         logger.warning("\nTraining interrupted by user. Starting cleanup...")
     except Exception as e:
         logger.error(f"An error occurred: {e}")
-        logger.exception("Exception details:")  # This will print the full traceback
+        logger.exception("Exception details:")
     finally:
         if trainer is not None:
             try:
