@@ -108,26 +108,19 @@ class Trainer:
         self.start_epoch = 0
         self.best_acc = 0
 
-        # Data transforms
-        self.transform = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-
         # 1. Setup data first
         self.setup_data()
         logger.info("Data loaders initialized")
 
-        # 2. Initialize model and optimizer
+        # 2. Initialize model, criterion, and optimizer
         self.model = ImageNetModel(num_classes=1000, pretrained=True).to(self.device)
+        self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=config['learning_rate'],
             weight_decay=1e-4
         )
-        logger.info("Model and optimizer initialized")
+        logger.info("Model, criterion, and optimizer initialized")
 
         # 3. Load checkpoint - This will update model, optimizer, and epoch states
         self.load_checkpoint()
@@ -261,14 +254,14 @@ class Trainer:
         total_loss = 0
         correct = 0
         total = 0
-        scaler = GradScaler()
+        scaler = GradScaler('cuda')
 
         logger.info("Starting training epoch...")
         for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader)):
             images, labels = images.to(self.device), labels.to(self.device)
 
             self.optimizer.zero_grad()
-            with autocast():
+            with autocast('cuda'):
                 outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
 
