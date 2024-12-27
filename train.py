@@ -44,6 +44,7 @@ class ImageNetDataset(Dataset):
             os.makedirs(split_dir, exist_ok=True)
 
         # Load dataset
+        logger.info(f"Loading {'training' if is_train else 'validation'} dataset...")
         full_dataset = load_dataset(
             'imagenet-1k',
             split=dataset_split,
@@ -57,7 +58,7 @@ class ImageNetDataset(Dataset):
             self.dataset = full_dataset.select(indices)
         else:
             logger.info("Generating new split and saving indices...")
-            indices = list(range(len(full_dataset)))  # Use full dataset, or split further if needed
+            indices = list(range(len(full_dataset)))
             with open(split_file, 'wb') as f:
                 pickle.dump(indices, f)
             self.dataset = full_dataset
@@ -68,14 +69,29 @@ class ImageNetDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx):
-        sample = self.dataset[idx]
-        image = sample['image']
-        label = sample['label']
-        
-        if self.transform:
-            image = self.transform(image)
+        try:
+            sample = self.dataset[idx]
+            image = sample['image']  # PIL Image
+            label = sample['label']
+
+            # Ensure image is RGB
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+                
+            if self.transform:
+                image = self.transform(image)
+                
+            # Add debug check for tensor shape
+            if isinstance(image, torch.Tensor):
+                if image.shape[0] != 3:
+                    logger.error(f"Incorrect number of channels: {image.shape} at index {idx}")
+                    raise ValueError(f"Expected 3 channels, got {image.shape[0]}")
+                
+            return image, label
             
-        return image, label
+        except Exception as e:
+            logger.error(f"Error processing image at index {idx}: {str(e)}")
+            raise
 
 class Trainer:
     
@@ -174,6 +190,7 @@ class Trainer:
 
     def setup_data(self):
         train_transform = transforms.Compose([
+            transforms.Lambda(lambda x: x.convert('RGB')),  # Ensure RGB
             transforms.RandomResizedCrop(224),
             transforms.RandomHorizontalFlip(),
             transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
@@ -183,6 +200,7 @@ class Trainer:
         ])
         
         val_transform = transforms.Compose([
+            transforms.Lambda(lambda x: x.convert('RGB')),  # Ensure RGB
             transforms.Resize(256),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
