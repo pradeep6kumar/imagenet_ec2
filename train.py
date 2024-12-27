@@ -1,3 +1,7 @@
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+
 import logging
 import os
 import torch
@@ -178,6 +182,10 @@ class Trainer:
         self.plots_dir = os.path.join('/home/ubuntu/imagenet_ec2', 'plots')
         os.makedirs(self.plots_dir, exist_ok=True)
 
+        # Add CUDA streams
+        self.compute_stream = torch.cuda.Stream()
+        self.transfer_stream = torch.cuda.Stream()
+
     def _run_checkpoint_worker(self):
         """Run the checkpoint worker in its own thread with its own event loop"""
         asyncio.set_event_loop(self.loop)
@@ -238,8 +246,10 @@ class Trainer:
             batch_size=self.config['batch_size'],
             shuffle=True,
             num_workers=self.config['num_workers'],
-            pin_memory=True,
-            prefetch_factor=2
+            pin_memory=self.config['pin_memory'],
+            prefetch_factor=self.config['prefetch_factor'],
+            persistent_workers=True,
+            drop_last=True
         )
         
         self.val_loader = DataLoader(
@@ -247,8 +257,9 @@ class Trainer:
             batch_size=self.config['batch_size'],
             shuffle=False,
             num_workers=self.config['num_workers'],
-            pin_memory=True,
-            prefetch_factor=2
+            pin_memory=self.config['pin_memory'],
+            prefetch_factor=self.config['prefetch_factor'],
+            persistent_workers=True
         )
 
 
@@ -260,25 +271,29 @@ class Trainer:
         scaler = GradScaler()
         start_time = time.time()
 
-        # Log initial stats
-        self.log_system_stats()
-
-        logger.info("Starting training epoch...")
         for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader)):
-            images, labels = images.to(self.device), labels.to(self.device)
+            torch.cuda.synchronize()
+            
+            with torch.cuda.stream(self.transfer_stream):
+                images = images.to(self.device, non_blocking=True)
+                labels = labels.to(self.device, non_blocking=True)
+            
+            with torch.cuda.stream(self.compute_stream):
+                self.optimizer.zero_grad(set_to_none=True)
+                
+                with autocast():
+                    outputs = self.model(images)
+                    loss = self.criterion(outputs, labels)
 
-            self.optimizer.zero_grad()
-            with autocast():
-                outputs = self.model(images)
-                loss = self.criterion(outputs, labels)
+                scaler.scale(loss).backward()
+                scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_value)
+                scaler.step(self.optimizer)
+                scaler.update()
 
-            scaler.scale(loss).backward()
-            scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_value)
-            scaler.step(self.optimizer)
-            scaler.update()
+                self.scheduler.step()
 
-            self.scheduler.step()
+            torch.cuda.synchronize()
 
             total_loss += loss.item()
             _, predicted = outputs.max(1)
