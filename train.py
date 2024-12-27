@@ -261,7 +261,7 @@ class Trainer:
             images, labels = images.to(self.device), labels.to(self.device)
 
             self.optimizer.zero_grad()
-            with autocast(device_type='cuda', enabled=True):
+            with autocast():
                 outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
 
