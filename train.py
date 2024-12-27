@@ -297,7 +297,10 @@ class Trainer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(42)
         
-        for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader, ncols=100, desc="Training")):
+        for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader, 
+                                                         ncols=100, 
+                                                         desc="Training",
+                                                         miniters=100)):
             # Move data to GPU
             images = images.cuda(non_blocking=True)
             labels = labels.cuda(non_blocking=True)
