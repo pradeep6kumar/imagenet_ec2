@@ -16,6 +16,7 @@ from logging.handlers import RotatingFileHandler
 import time
 from datasets import load_dataset
 import numpy as np
+import pickle
 
 # Add rotating file handler
 rotating_handler = RotatingFileHandler("training.log", maxBytes=5_000_000, backupCount=5)  # 5 MB per log
@@ -33,29 +34,43 @@ logger = logging.getLogger(__name__)
 logger.addHandler(rotating_handler)
 
 class ImageNetDataset(Dataset):
-    def __init__(self, transform=None, is_train=True):
+    def __init__(self, transform=None, is_train=True, split_dir='/home/ubuntu/imagenet_ec2/data/'):
         self.transform = transform
-        
-        # Load the ImageNet dataset from HuggingFace
-        logger.info("Loading ImageNet dataset from HuggingFace...")
-        self.dataset = load_dataset(
+        self.is_train = is_train
+        split_file = os.path.join(split_dir, 'train_indices.pkl' if is_train else 'val_indices.pkl')
+        dataset_split = 'train' if is_train else 'validation'
+
+        if not os.path.exists(split_dir):
+            os.makedirs(split_dir, exist_ok=True)
+
+        # Load dataset
+        full_dataset = load_dataset(
             'imagenet-1k',
-            split='train' if is_train else 'validation',
+            split=dataset_split,
             cache_dir='/home/ubuntu/.cache/huggingface/datasets'
         )
-        
+
+        if os.path.exists(split_file):
+            logger.info(f"Loading saved split indices from {split_file}...")
+            with open(split_file, 'rb') as f:
+                indices = pickle.load(f)
+            self.dataset = full_dataset.select(indices)
+        else:
+            logger.info("Generating new split and saving indices...")
+            indices = list(range(len(full_dataset)))  # Use full dataset, or split further if needed
+            with open(split_file, 'wb') as f:
+                pickle.dump(indices, f)
+            self.dataset = full_dataset
+
         logger.info(f"Dataset loaded with {len(self.dataset)} samples")
-        
+
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, idx):
-        # Get sample from the HuggingFace dataset
         sample = self.dataset[idx]
-        
-        # Convert image from PIL to tensor and apply transforms
-        image = sample['image']  # Already a PIL Image
-        label = sample['label']  # Integer label
+        image = sample['image']
+        label = sample['label']
         
         if self.transform:
             image = self.transform(image)
