@@ -27,6 +27,7 @@ from datetime import datetime
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 os.environ['TORCH_CUDA_ARCH_LIST'] = '7.0;7.5;8.0;8.6'
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 # Then CUDA optimizations
 torch.backends.cudnn.benchmark = True
@@ -647,27 +648,24 @@ if __name__ == '__main__':
     config = {
         'data_dir': 'data',
         'checkpoint_dir': 'checkpoints',
-        'batch_size': 512,
-        'learning_rate': 0.001 * 4,
+        'batch_size': 128,
+        'learning_rate': 0.001 * 2,
         'epochs': 30,
         'num_workers': 8,
         'checkpoint_frequency': 5,
-        # Optimizer parameters
         'weight_decay': 1e-4,
-        # Additional parameters
         'warmup_epochs': 5,
         'grad_clip_value': 1.0,
         'early_stopping_patience': 10,
         'early_stopping_delta': 0.001,
-        # DataLoader parameters
         'pin_memory': True,
         'prefetch_factor': 2,
-        # OneCycleLR parameters
         'cycle_momentum': True,
         'base_momentum': 0.85,
         'max_momentum': 0.95,
         'div_factor': 25,
-        'final_div_factor': 1e4
+        'final_div_factor': 1e4,
+        'gradient_accumulation_steps': 4
     }
 
     os.makedirs(config['checkpoint_dir'], exist_ok=True)
