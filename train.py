@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 import psutil
 import subprocess
 from datetime import datetime
+from torch.optim.swa_utils import AveragedModel, SWALR
 
 # Then environment variables and CUDA settings
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
@@ -203,6 +204,14 @@ class Trainer:
             torch.cuda.synchronize()
             del warmup
 
+        # Initialize SWA after 75% of training
+        self.swa_start = int(0.75 * config['epochs'])
+        self.swa_model = AveragedModel(self.model)
+        self.swa_scheduler = SWALR(
+            self.optimizer,
+            swa_lr=config['learning_rate'] * 0.1
+        )
+
     def _run_checkpoint_worker(self):
         """Run the checkpoint worker in its own thread with its own event loop"""
         asyncio.set_event_loop(self.loop)
@@ -377,26 +386,36 @@ class Trainer:
         return total_loss / len(self.val_loader), accuracy
 
 
-    def save_checkpoint(self, epoch, is_best=False):
+    def save_checkpoint(self, epoch, is_best=False, is_periodic=False):
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'best_acc': self.best_acc,
-            'config': self.config
+            'config': self.config,
+            'swa_model_state_dict': self.swa_model.state_dict() if epoch >= self.swa_start else None
         }
 
-        # Use the stored event loop
+        # Regular checkpoint
         checkpoint_path = os.path.join(self.config['checkpoint_dir'], 'last_checkpoint.pth')
         asyncio.run_coroutine_threadsafe(
             self.checkpoint_queue.put((checkpoint, checkpoint_path)), 
             self.loop
         )
 
+        # Best model checkpoint
         if is_best:
             best_path = os.path.join(self.config['checkpoint_dir'], 'best_model.pth')
             asyncio.run_coroutine_threadsafe(
                 self.checkpoint_queue.put((checkpoint, best_path)), 
+                self.loop
+            )
+        
+        # Periodic checkpoint every 10 epochs
+        if is_periodic:
+            periodic_path = os.path.join(self.config['checkpoint_dir'], f'checkpoint_epoch_{epoch}.pth')
+            asyncio.run_coroutine_threadsafe(
+                self.checkpoint_queue.put((checkpoint, periodic_path)), 
                 self.loop
             )
     
@@ -494,6 +513,17 @@ class Trainer:
                 logger.info(f"Samples/second: {samples_per_second:.2f}")
                 logger.info(f"Time/epoch: {(time.time() - epoch_start_time) / 3600:.2f} hours")
                 logger.info(f"Estimated total time: {(self.config['epochs'] - epoch) * (time.time() - epoch_start_time) / 3600:.2f} hours")
+                
+                # Switch to SWA after 75% of training
+                if epoch >= self.swa_start:
+                    self.swa_model.update_parameters(self.model)
+                    self.swa_scheduler.step()
+                else:
+                    self.scheduler.step()
+                    
+                # Save every 10th epoch
+                if epoch % 10 == 0:
+                    self.save_checkpoint(epoch, is_best=False, is_periodic=True)
                 
         except Exception as e:
             logger.error(f"Training failed with error: {e}")
