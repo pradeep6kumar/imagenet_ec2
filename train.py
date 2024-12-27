@@ -20,7 +20,8 @@ import pickle
 from torch_lr_finder import LRFinder
 import matplotlib.pyplot as plt
 import psutil
-import GPUtil
+import subprocess
+from datetime import datetime
 
 # Add rotating file handler
 rotating_handler = RotatingFileHandler("training.log", maxBytes=5_000_000, backupCount=5)  # 5 MB per log
@@ -257,11 +258,10 @@ class Trainer:
         correct = 0
         total = 0
         scaler = GradScaler()
+        start_time = time.time()
 
-        # Add GPU monitoring
-        logger.info(f"GPU Memory before training:")
-        logger.info(f"Allocated: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
-        logger.info(f"Cached: {torch.cuda.memory_reserved(0) / 1024**2:.2f} MB")
+        # Log initial stats
+        self.log_system_stats()
 
         logger.info("Starting training epoch...")
         for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader)):
@@ -278,7 +278,6 @@ class Trainer:
             scaler.step(self.optimizer)
             scaler.update()
 
-            # Step the scheduler after each batch
             self.scheduler.step()
 
             total_loss += loss.item()
@@ -288,7 +287,15 @@ class Trainer:
 
             if batch_idx % 100 == 0:
                 current_lr = self.scheduler.get_last_lr()[0]
-                logger.info(f"Batch {batch_idx}: Loss = {loss.item():.4f}, LR = {current_lr:.6f}")
+                current_speed = batch_idx * self.config['batch_size'] / (time.time() - start_time)
+                
+                logger.info(f"\nBatch {batch_idx}/{len(self.train_loader)}:")
+                logger.info(f"Loss = {loss.item():.4f}")
+                logger.info(f"LR = {current_lr:.6f}")
+                logger.info(f"Speed = {current_speed:.2f} samples/sec")
+                
+                # Log system stats every 100 batches
+                self.log_system_stats()
 
         return total_loss / len(self.train_loader), 100. * correct / total
     
@@ -572,20 +579,30 @@ class Trainer:
 
     def log_system_stats(self):
         """Log system resource utilization"""
-        # CPU Usage
-        cpu_usage = psutil.cpu_percent(interval=1)
-        ram_usage = psutil.virtual_memory().percent
-        
-        # GPU Usage
-        gpus = GPUtil.getGPUs()
-        gpu_usage = gpus[0].load * 100 if gpus else 0
-        gpu_memory = gpus[0].memoryUsed if gpus else 0
-        
-        logger.info(f"\nSystem Stats:")
-        logger.info(f"CPU Usage: {cpu_usage}%")
-        logger.info(f"RAM Usage: {ram_usage}%")
-        logger.info(f"GPU Usage: {gpu_usage:.1f}%")
-        logger.info(f"GPU Memory: {gpu_memory} MB")
+        try:
+            # CPU Usage
+            cpu_usage = psutil.cpu_percent(interval=1)
+            ram_usage = psutil.virtual_memory().percent
+            
+            # GPU Usage using nvidia-smi
+            try:
+                gpu_info = subprocess.check_output(
+                    ['nvidia-smi', '--query-gpu=utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits'],
+                    encoding='utf-8'
+                )
+                gpu_util, mem_used, mem_total = map(float, gpu_info.strip().split(','))
+                
+                logger.info(f"\nSystem Stats ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}):")
+                logger.info(f"CPU Usage: {cpu_usage}%")
+                logger.info(f"RAM Usage: {ram_usage}%")
+                logger.info(f"GPU Utilization: {gpu_util}%")
+                logger.info(f"GPU Memory: {mem_used}/{mem_total} MB ({(mem_used/mem_total)*100:.1f}%)")
+                
+            except subprocess.CalledProcessError:
+                logger.warning("Failed to get GPU stats from nvidia-smi")
+                
+        except Exception as e:
+            logger.error(f"Error logging system stats: {e}")
 
 
 
