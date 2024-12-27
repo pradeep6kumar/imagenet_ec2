@@ -265,8 +265,7 @@ class Trainer:
             pin_memory=True,
             prefetch_factor=2,
             persistent_workers=True,
-            drop_last=True,
-            generator=torch.Generator(device='cuda')
+            drop_last=True
         )
         
         self.val_loader = DataLoader(
@@ -288,9 +287,14 @@ class Trainer:
         scaler = GradScaler()
         start_time = time.time()
 
-        # Ensure model is on GPU and in train mode
+        # Ensure model is on GPU
         self.model = self.model.cuda()
         torch.cuda.synchronize()
+        
+        # Set random seed for reproducibility
+        torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(42)
         
         for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader, ncols=100, desc="Training")):
             # Move data to GPU
@@ -319,7 +323,7 @@ class Trainer:
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
 
-            # Log less frequently (every 500 batches)
+            # Log less frequently
             if batch_idx % 500 == 0:
                 current_lr = self.scheduler.get_last_lr()[0]
                 current_speed = batch_idx * self.config['batch_size'] / (time.time() - start_time + 1e-8)
@@ -331,6 +335,10 @@ class Trainer:
                     f"LR: {current_lr:.6f}"
                 )
                 self.log_system_stats()
+
+            # Optional: Clear cache periodically
+            if batch_idx % 1000 == 0:
+                torch.cuda.empty_cache()
 
         return total_loss / len(self.train_loader), 100. * correct / total
     
