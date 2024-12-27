@@ -2,6 +2,8 @@ import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 os.environ['TORCH_CUDA_ARCH_LIST'] = '7.0;7.5;8.0;8.6'  # Adjust based on your GPU
+torch.backends.cudnn.benchmark = True  # Add this
+torch.backends.cudnn.enabled = True    # Add this
 
 import logging
 import os
@@ -258,10 +260,11 @@ class Trainer:
             batch_size=self.config['batch_size'],
             shuffle=True,
             num_workers=self.config['num_workers'],
-            pin_memory=self.config['pin_memory'],
-            prefetch_factor=self.config['prefetch_factor'],
+            pin_memory=True,
+            prefetch_factor=2,
             persistent_workers=True,
-            drop_last=True
+            drop_last=True,
+            generator=torch.Generator(device='cuda')
         )
         
         self.val_loader = DataLoader(
@@ -283,49 +286,48 @@ class Trainer:
         scaler = GradScaler()
         start_time = time.time()
 
-        # Ensure model is on GPU
+        # Ensure model is on GPU and in train mode
         self.model = self.model.cuda()
+        torch.cuda.synchronize()
         
-        for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader)):
-            torch.cuda.synchronize()
-            
-            # Ensure data is on GPU
+        for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader, ncols=100, desc="Training")):
+            # Move data to GPU
             images = images.cuda(non_blocking=True)
             labels = labels.cuda(non_blocking=True)
             
-            with torch.cuda.stream(self.compute_stream):
-                self.optimizer.zero_grad(set_to_none=True)
-                
-                with autocast(enabled=True):  # Explicitly enable autocast
-                    outputs = self.model(images)
-                    loss = self.criterion(outputs, labels)
+            # Forward pass and loss computation
+            self.optimizer.zero_grad(set_to_none=True)
+            
+            with autocast():
+                outputs = self.model(images)
+                loss = self.criterion(outputs, labels)
 
-                scaler.scale(loss).backward()
-                scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_value)
-                scaler.step(self.optimizer)
-                scaler.update()
+            # Backward pass
+            scaler.scale(loss).backward()
+            scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_value)
+            scaler.step(self.optimizer)
+            scaler.update()
 
-                self.scheduler.step()
+            self.scheduler.step()
 
-            # Force CUDA synchronization
-            torch.cuda.synchronize()
-
+            # Update metrics
             total_loss += loss.item()
             _, predicted = outputs.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
 
-            if batch_idx % 100 == 0:
+            # Log less frequently (every 500 batches)
+            if batch_idx % 500 == 0:
                 current_lr = self.scheduler.get_last_lr()[0]
-                current_speed = batch_idx * self.config['batch_size'] / (time.time() - start_time)
+                current_speed = batch_idx * self.config['batch_size'] / (time.time() - start_time + 1e-8)
                 
-                logger.info(f"\nBatch {batch_idx}/{len(self.train_loader)}:")
-                logger.info(f"Loss = {loss.item():.4f}")
-                logger.info(f"LR = {current_lr:.6f}")
-                logger.info(f"Speed = {current_speed:.2f} samples/sec")
-                
-                # Log system stats every 100 batches
+                logger.info(
+                    f"Batch {batch_idx}/{len(self.train_loader)} | "
+                    f"Loss: {loss.item():.3f} | "
+                    f"Speed: {current_speed:.1f} img/s | "
+                    f"LR: {current_lr:.6f}"
+                )
                 self.log_system_stats()
 
         return total_loss / len(self.train_loader), 100. * correct / total
@@ -609,42 +611,23 @@ class Trainer:
         return not (os.path.exists(checkpoint_path) or os.path.exists(lr_finder_path))
 
     def log_system_stats(self):
-        """Log system resource utilization"""
         try:
-            # CPU Usage
-            cpu_usage = psutil.cpu_percent(interval=1)
-            ram_usage = psutil.virtual_memory().percent
+            gpu_info = subprocess.check_output([
+                'nvidia-smi',
+                '--query-gpu=utilization.gpu,memory.used,memory.total',
+                '--format=csv,noheader,nounits'
+            ], encoding='utf-8')
             
-            # More detailed GPU monitoring
-            try:
-                gpu_info = subprocess.check_output([
-                    'nvidia-smi',
-                    '--query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu',
-                    '--format=csv,noheader,nounits'
-                ], encoding='utf-8')
-                
-                gpu_util, mem_util, mem_used, mem_total, temp = map(float, gpu_info.strip().split(','))
-                
-                logger.info(f"\nSystem Stats ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}):")
-                logger.info(f"CPU Usage: {cpu_usage}%")
-                logger.info(f"RAM Usage: {ram_usage}%")
-                logger.info(f"GPU Stats:")
-                logger.info(f"- GPU Utilization: {gpu_util}%")
-                logger.info(f"- Memory Utilization: {mem_util}%")
-                logger.info(f"- Memory Used: {mem_used}/{mem_total} MB ({(mem_used/mem_total)*100:.1f}%)")
-                logger.info(f"- GPU Temperature: {temp}°C")
-                
-                # Add CUDA memory stats
-                logger.info(f"CUDA Memory:")
-                logger.info(f"- Allocated: {torch.cuda.memory_allocated()/1024**2:.1f} MB")
-                logger.info(f"- Reserved: {torch.cuda.memory_reserved()/1024**2:.1f} MB")
-                logger.info(f"- Max Allocated: {torch.cuda.max_memory_allocated()/1024**2:.1f} MB")
-                
-            except subprocess.CalledProcessError:
-                logger.warning("Failed to get GPU stats from nvidia-smi")
-                
+            gpu_util, mem_used, mem_total = map(float, gpu_info.strip().split(','))
+            
+            logger.info(
+                f"GPU: {gpu_util}% | "
+                f"Memory: {mem_used}/{mem_total}MB | "
+                f"CUDA Allocated: {torch.cuda.memory_allocated()/1024**2:.0f}MB"
+            )
+            
         except Exception as e:
-            logger.error(f"Error logging system stats: {e}")
+            logger.error(f"Error logging stats: {e}")
 
 
 
@@ -654,8 +637,8 @@ if __name__ == '__main__':
     config = {
         'data_dir': 'data',
         'checkpoint_dir': 'checkpoints',
-        'batch_size': 256,
-        'learning_rate': 0.001 * 2,
+        'batch_size': 512,
+        'learning_rate': 0.001 * 4,
         'epochs': 30,
         'num_workers': 8,
         'checkpoint_frequency': 5,
@@ -668,7 +651,7 @@ if __name__ == '__main__':
         'early_stopping_delta': 0.001,
         # DataLoader parameters
         'pin_memory': True,
-        'prefetch_factor': 4,
+        'prefetch_factor': 2,
         # OneCycleLR parameters
         'cycle_momentum': True,
         'base_momentum': 0.85,
