@@ -1,12 +1,5 @@
 import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-os.environ['TORCH_CUDA_ARCH_LIST'] = '7.0;7.5;8.0;8.6'  # Adjust based on your GPU
-torch.backends.cudnn.benchmark = True  # Add this
-torch.backends.cudnn.enabled = True    # Add this
-
 import logging
-import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -29,6 +22,15 @@ import matplotlib.pyplot as plt
 import psutil
 import subprocess
 from datetime import datetime
+
+# Then environment variables and CUDA settings
+os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['TORCH_CUDA_ARCH_LIST'] = '7.0;7.5;8.0;8.6'
+
+# Then CUDA optimizations
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.enabled = True
 
 # Add rotating file handler
 rotating_handler = RotatingFileHandler("training.log", maxBytes=5_000_000, backupCount=5)  # 5 MB per log
