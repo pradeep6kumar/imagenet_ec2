@@ -324,8 +324,8 @@ class Trainer:
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
 
-            # Log less frequently
-            if batch_idx % 500 == 0:
+            # Change logging frequency to 1000 batches
+            if batch_idx % 1000 == 0:
                 current_lr = self.scheduler.get_last_lr()[0]
                 current_speed = batch_idx * self.config['batch_size'] / (time.time() - start_time + 1e-8)
                 
@@ -337,7 +337,7 @@ class Trainer:
                 )
                 self.log_system_stats()
 
-            # Optional: Clear cache periodically
+            # Optional: Clear cache periodically (keep this at 1000 as well)
             if batch_idx % 1000 == 0:
                 torch.cuda.empty_cache()
 
