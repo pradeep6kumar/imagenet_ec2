@@ -298,7 +298,7 @@ class Trainer:
         total_loss = 0
         correct = 0
         total = 0
-        scaler = GradScaler(device='cuda')
+        scaler = GradScaler()
         start_time = time.time()
 
         # Ensure model is on GPU
