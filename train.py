@@ -91,19 +91,20 @@ class Trainer:
         # Loss and optimizer with simple parameters
         self.criterion = nn.CrossEntropyLoss()
         
-        # Initialize optimizer (SGD instead of Adam)
+        # Initialize optimizer with all required parameters for SGD
         self.optimizer = optim.SGD(
             self.model.parameters(),
             lr=config['learning_rate'],
-            momentum=0.9,  # Important for SGD
+            momentum=0.9,
             weight_decay=config['weight_decay'],
-            nesterov=True  # Use Nesterov momentum
+            nesterov=True,
+            dampening=0  # Add dampening parameter
         )
 
         # Setup data first to get loader length
         self.setup_data()
 
-        # Replace the ReduceLROnPlateau scheduler with MultiStepLR
+        # Initialize schedulers
         self.scheduler = torch.optim.lr_scheduler.MultiStepLR(
             self.optimizer,
             milestones=config['lr_schedule']['milestones'],
