@@ -47,12 +47,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("training.log"),
+        RotatingFileHandler("training.log", maxBytes=5_000_000, backupCount=5),  # Combined into one handler
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
-logger.addHandler(rotating_handler)
 
 class ImageNetDataset(Dataset):
     def __init__(self, transform=None, is_train=True, split_dir='/home/ubuntu/imagenet_ec2/data/'):
@@ -299,7 +298,7 @@ class Trainer:
         total_loss = 0
         correct = 0
         total = 0
-        scaler = GradScaler()
+        scaler = GradScaler(device='cuda')
         start_time = time.time()
 
         # Ensure model is on GPU
@@ -322,7 +321,7 @@ class Trainer:
             # Forward pass and loss computation
             self.optimizer.zero_grad(set_to_none=True)
             
-            with autocast():
+            with torch.amp.autocast(device_type='cuda'):
                 outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
 
@@ -483,7 +482,6 @@ class Trainer:
         try:
             for epoch in range(self.start_epoch, self.config['epochs']):
                 epoch_start_time = time.time()
-                
                 logger.info(f"Epoch: {epoch + 1}/{self.config['epochs']}")
                 
                 try:
@@ -502,6 +500,10 @@ class Trainer:
                     logger.info(f"Training   - Loss: {train_loss:.4f}, Accuracy: {train_acc:.2f}%")
                     logger.info(f"Validation - Loss: {val_loss:.4f}, Accuracy: {val_acc:.2f}%")
                     logger.info(f"Times      - Epoch: {epoch_time:.2f}s, Validation: {val_time:.2f}s")
+                    
+                    # Save periodic checkpoint with actual epoch number
+                    if epoch % 10 == 0:
+                        self.save_checkpoint(epoch, is_best=False, is_periodic=True)
                     
                     # Store metrics and handle checkpoints
                     self._update_metrics(epoch, train_loss, val_loss, train_acc, val_acc)
@@ -526,10 +528,6 @@ class Trainer:
                 logger.info(f"Samples/second: {samples_per_second:.2f}")
                 logger.info(f"Time/epoch: {(time.time() - epoch_start_time) / 3600:.2f} hours")
                 logger.info(f"Estimated total time: {(self.config['epochs'] - epoch) * (time.time() - epoch_start_time) / 3600:.2f} hours")
-                
-                # Save periodic checkpoint
-                if epoch % 10 == 0:
-                    self.save_checkpoint(epoch, is_best=False, is_periodic=True)
                 
         except Exception as e:
             logger.error(f"Training failed with error: {e}")
