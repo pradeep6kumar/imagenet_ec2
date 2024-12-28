@@ -335,22 +335,26 @@ class Trainer:
 
             self.scheduler.step()
 
-            # Update metrics
-            total_loss += loss.item()
+            # Calculate batch accuracy
             _, predicted = outputs.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
+            batch_acc = 100. * correct / total  # Calculate running accuracy
 
-            # Change logging frequency to 1000 batches
+            # Update total loss
+            total_loss += loss.item()  # Add this back
+
             if batch_idx % 1000 == 0:
                 current_lr = self.scheduler.get_last_lr()[0]
                 current_speed = batch_idx * self.config['batch_size'] / (time.time() - start_time + 1e-8)
                 
+                # Add explicit accuracy logging
                 logger.info(
-                    f"Batch {batch_idx}/{len(self.train_loader)} | "
-                    f"Loss: {loss.item():.3f} | "
-                    f"Speed: {current_speed:.1f} img/s | "
-                    f"LR: {current_lr:.6f}"
+                    f"\nBatch {batch_idx}/{len(self.train_loader)}:"
+                    f"\n  - Loss: {loss.item():.3f}"
+                    f"\n  - Accuracy: {batch_acc:.2f}%"
+                    f"\n  - Speed: {current_speed:.1f} img/s"
+                    f"\n  - LR: {current_lr:.6f}"
                 )
                 self.log_system_stats()
 
@@ -483,33 +487,37 @@ class Trainer:
                 logger.info(f"Epoch: {epoch + 1}/{self.config['epochs']}")
                 
                 try:
-                    start_time = time.time()
-                    # Start training and validation
+                    # Training phase
                     train_loss, train_acc = self.train_epoch()
+                    
+                    # Validation phase
+                    logger.info("\nStarting validation phase...")
                     val_start_time = time.time()
                     val_loss, val_acc = self.validate()
                     val_time = time.time() - val_start_time
-                    epoch_time = time.time() - start_time
+                    epoch_time = time.time() - epoch_start_time
                     
-                    # Add the epoch summary log here
-                    logger.info(f"Epoch {epoch + 1} Summary: Train Loss = {train_loss:.4f}, "
-                              f"Train Acc = {train_acc:.2f}%, Val Loss = {val_loss:.4f}, "
-                              f"Val Acc = {val_acc:.2f}%, Epoch Time = {epoch_time:.2f}s, "
-                              f"Validation Time = {val_time:.2f}s")
+                    # Print detailed epoch summary
+                    logger.info(f"\nEpoch {epoch + 1} Summary:")
+                    logger.info(f"Training   - Loss: {train_loss:.4f}, Accuracy: {train_acc:.2f}%")
+                    logger.info(f"Validation - Loss: {val_loss:.4f}, Accuracy: {val_acc:.2f}%")
+                    logger.info(f"Times      - Epoch: {epoch_time:.2f}s, Validation: {val_time:.2f}s")
                     
                     # Store metrics and handle checkpoints
                     self._update_metrics(epoch, train_loss, val_loss, train_acc, val_acc)
                     
+                    # Save best model if validation accuracy improves
+                    if val_acc > self.best_acc:
+                        self.best_acc = val_acc
+                        self.save_checkpoint(epoch, is_best=True)
+                        logger.info(f"New best validation accuracy: {val_acc:.2f}%")
+                    
                 except KeyboardInterrupt:
                     logger.warning("\nTraining interrupted by user during epoch %d", epoch + 1)
-                    # Save checkpoint before exiting
                     self.save_checkpoint(epoch)
-                    return  # Exit training loop
+                    return
                 
-                if self.early_stopping_counter >= self.patience:
-                    logger.info(f"Early stopping triggered after {epoch + 1} epochs")
-                    break
-                
+                # Log training speed stats
                 samples_processed += len(self.train_loader.dataset)
                 elapsed_time = time.time() - total_start_time
                 samples_per_second = samples_processed / elapsed_time
@@ -519,14 +527,7 @@ class Trainer:
                 logger.info(f"Time/epoch: {(time.time() - epoch_start_time) / 3600:.2f} hours")
                 logger.info(f"Estimated total time: {(self.config['epochs'] - epoch) * (time.time() - epoch_start_time) / 3600:.2f} hours")
                 
-                # Switch to SWA after 75% of training
-                if epoch >= self.swa_start:
-                    self.swa_model.update_parameters(self.model)
-                    self.swa_scheduler.step()
-                else:
-                    self.scheduler.step()
-                    
-                # Save every 10th epoch
+                # Save periodic checkpoint
                 if epoch % 10 == 0:
                     self.save_checkpoint(epoch, is_best=False, is_periodic=True)
                 
@@ -534,7 +535,6 @@ class Trainer:
             logger.error(f"Training failed with error: {e}")
             raise
         finally:
-            # Ensure cleanup happens
             try:
                 self.shutdown_worker()
                 torch.cuda.empty_cache()
