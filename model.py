@@ -7,21 +7,26 @@ class ImageNetModel(nn.Module):
     def __init__(self, num_classes=1000, pretrained=True):
         super(ImageNetModel, self).__init__()
         
-        # Load ResNet50 with memory efficient settings
-        self.model = resnet50(weights=None)
-        
+        # Load ResNet50 with pretrained weights directly
         if pretrained:
-            checkpoint_path = os.path.join('checkpoints', 'resnet50_pretrained.pth')
-            if os.path.exists(checkpoint_path):
-                print(f"Loading pretrained weights from {checkpoint_path}")
-                self.model.load_state_dict(torch.load(checkpoint_path))
-            else:
-                print("No local checkpoint found, downloading pretrained weights...")
-                self.model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+            print("Loading pretrained ResNet50 with ImageNet weights...")
+            self.model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        else:
+            self.model = resnet50(weights=None)
         
-        # Replace the final fully connected layer
+        # Get the input features of final layer
         num_features = self.model.fc.in_features
-        self.model.fc = nn.Linear(num_features, num_classes)
+        
+        # Replace the final layer with proper initialization
+        self.model.fc = nn.Sequential(
+            nn.Dropout(0.2),  # Add dropout for regularization
+            nn.Linear(num_features, num_classes),
+            nn.BatchNorm1d(num_classes)  # Add batch norm for stability
+        )
+        
+        # Initialize the new layers properly
+        nn.init.xavier_uniform_(self.model.fc[1].weight)
+        nn.init.zeros_(self.model.fc[1].bias)
         
         # Enable memory efficient features
         torch.backends.cudnn.benchmark = True
