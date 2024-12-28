@@ -23,6 +23,7 @@ import psutil
 import subprocess
 from datetime import datetime
 from torch.optim.swa_utils import AveragedModel, SWALR
+from config import config  # Import config
 
 # Then environment variables and CUDA settings
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
@@ -678,29 +679,6 @@ class Trainer:
 
 
 if __name__ == '__main__':
-    config = {
-        'data_dir': 'data',
-        'checkpoint_dir': 'checkpoints',
-        'batch_size': 128,
-        'learning_rate': 0.001 * 2,
-        'epochs': 30,
-        'num_workers': 8,
-        'checkpoint_frequency': 5,
-        'weight_decay': 1e-4,
-        'warmup_epochs': 5,
-        'grad_clip_value': 1.0,
-        'early_stopping_patience': 10,
-        'early_stopping_delta': 0.001,
-        'pin_memory': True,
-        'prefetch_factor': 2,
-        'cycle_momentum': True,
-        'base_momentum': 0.85,
-        'max_momentum': 0.95,
-        'div_factor': 25,
-        'final_div_factor': 1e4,
-        'gradient_accumulation_steps': 4
-    }
-
     os.makedirs(config['checkpoint_dir'], exist_ok=True)
     trainer = None
     
