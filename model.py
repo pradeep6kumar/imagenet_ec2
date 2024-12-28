@@ -4,15 +4,12 @@ from torchvision.models import resnet50, ResNet50_Weights
 import os
 
 class ImageNetModel(nn.Module):
-    def __init__(self, num_classes=1000, pretrained=True):
+    def __init__(self, num_classes=1000, pretrained=False):
         super(ImageNetModel, self).__init__()
         
-        # Load ResNet50 with pretrained weights directly
-        if pretrained:
-            print("Loading pretrained ResNet50 with ImageNet weights...")
-            self.model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
-        else:
-            self.model = resnet50(weights=None)
+        # Initialize ResNet50 without pretrained weights
+        print("Initializing ResNet50 from scratch...")
+        self.model = resnet50(weights=None)
         
         # Get the input features of final layer
         num_features = self.model.fc.in_features
