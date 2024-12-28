@@ -53,9 +53,11 @@ class ImageNetDataset(Dataset):
         # Get sample from the HuggingFace dataset
         sample = self.dataset[idx]
         
-        # Convert image from PIL to tensor and apply transforms
-        image = sample['image']  # Already a PIL Image
-        label = sample['label']  # Integer label
+        # Convert image from PIL to RGB if it's not already
+        image = sample['image']  # PIL Image
+        if image.mode != 'RGB':
+            image = image.convert('RGB')  # Add this line to ensure RGB
+        label = sample['label']
         
         if self.transform:
             image = self.transform(image)
@@ -219,8 +221,15 @@ class Trainer:
         total_loss = 0
         correct = 0
         total = 0
-        # Fix deprecated GradScaler
-        scaler = GradScaler('cuda')
+        
+        # Initialize GradScaler for mixed precision training
+        scaler = GradScaler(
+            init_scale=2**16,
+            growth_factor=2,
+            backoff_factor=0.5,
+            growth_interval=2000,
+            enabled=True
+        )
         
         # Improved progress tracking
         running_loss = 0.0
@@ -228,19 +237,26 @@ class Trainer:
         running_total = 0
         batch_start_time = time.time()
         
-        logger.info("Starting training epoch...")
+        logger.info("Starting training epoch with mixed precision...")
         for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader)):
-            images, labels = images.to(self.device), labels.to(self.device)
+            images = images.to(self.device, non_blocking=True)  # Added non_blocking=True
+            labels = labels.to(self.device, non_blocking=True)
 
-            self.optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             
-            with autocast():
+            # Mixed precision forward pass
+            with autocast(device_type='cuda', dtype=torch.float16):  # Explicitly set dtype
                 outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
 
+            # Mixed precision backward pass
             scaler.scale(loss).backward()
+            
+            # Unscale before gradient clipping
             scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_value)
+            
+            # Step with scaler
             scaler.step(self.optimizer)
             scaler.update()
 
@@ -291,22 +307,24 @@ class Trainer:
     
     def validate(self):
         self.model.eval()
-        torch.cuda.empty_cache()  # Clear GPU cache before validation
+        torch.cuda.empty_cache()
         
         total_loss = 0
         correct = 0
         total = 0
         top5_correct = 0
 
-        logger.info("Starting validation...")
-        with torch.no_grad():
+        logger.info("Starting validation with mixed precision...")
+        with torch.no_grad(), autocast(device_type='cuda', dtype=torch.float16):
             for batch_idx, (images, labels) in enumerate(tqdm(self.val_loader)):
-                images, labels = images.to(self.device), labels.to(self.device)
+                images = images.to(self.device, non_blocking=True)
+                labels = labels.to(self.device, non_blocking=True)
+                
                 outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
 
                 total_loss += loss.item()
-                _, predicted = outputs.topk(5, dim=1)  # Top-5 predictions
+                _, predicted = outputs.topk(5, dim=1)
                 total += labels.size(0)
                 correct += (predicted[:, 0] == labels).sum().item()
                 top5_correct += torch.sum(torch.any(predicted == labels.unsqueeze(1), dim=1)).item()
