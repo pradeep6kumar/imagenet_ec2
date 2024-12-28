@@ -30,4 +30,5 @@ class ImageNetModel(nn.Module):
         torch.backends.cudnn.deterministic = False
     
     def forward(self, x):
-        return self.model(x) 
+        logits = self.model(x)
+        return logits  # Make sure we return logits for proper loss calculation 

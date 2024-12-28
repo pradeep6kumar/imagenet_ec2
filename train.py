@@ -24,6 +24,10 @@ import subprocess
 from datetime import datetime
 from torch.optim.swa_utils import AveragedModel, SWALR
 from config import config  # Import config
+import warnings
+
+# Suppress PIL EXIF warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='PIL')
 
 # Then environment variables and CUDA settings
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
