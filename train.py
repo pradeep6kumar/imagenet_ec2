@@ -156,10 +156,10 @@ class Trainer:
         # Initialize OneCycleLR scheduler with remaining steps
         self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
             self.optimizer,
-            max_lr=config['learning_rate'] * 10,
+            max_lr=config['learning_rate'] * 5,
             total_steps=total_steps,
-            pct_start=0.3,
-            div_factor=25,
+            pct_start=0.1,
+            div_factor=10,
             final_div_factor=1e4,
             anneal_strategy='cos'
         )
