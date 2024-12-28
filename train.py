@@ -227,8 +227,7 @@ class Trainer:
             init_scale=2**16,
             growth_factor=2,
             backoff_factor=0.5,
-            growth_interval=2000,
-            enabled=True
+            growth_interval=2000
         )
         
         # Improved progress tracking
@@ -239,13 +238,13 @@ class Trainer:
         
         logger.info("Starting training epoch with mixed precision...")
         for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader)):
-            images = images.to(self.device, non_blocking=True)  # Added non_blocking=True
+            images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
             self.optimizer.zero_grad(set_to_none=True)
             
-            # Mixed precision forward pass
-            with autocast(device_type='cuda', dtype=torch.float16):  # Explicitly set dtype
+            # Mixed precision forward pass - simplified autocast usage
+            with autocast():
                 outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
 
@@ -315,7 +314,7 @@ class Trainer:
         top5_correct = 0
 
         logger.info("Starting validation with mixed precision...")
-        with torch.no_grad(), autocast(device_type='cuda', dtype=torch.float16):
+        with torch.no_grad(), autocast():
             for batch_idx, (images, labels) in enumerate(tqdm(self.val_loader)):
                 images = images.to(self.device, non_blocking=True)
                 labels = labels.to(self.device, non_blocking=True)
@@ -338,6 +337,8 @@ class Trainer:
         return total_loss / len(self.val_loader), 100. * correct / total
 
 
+
+    
     def save_checkpoint(self, epoch, is_best=False):
         checkpoint = {
             'epoch': epoch,
