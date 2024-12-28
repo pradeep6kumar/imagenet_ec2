@@ -1,5 +1,5 @@
-import logging
 import os
+import logging
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -16,6 +16,28 @@ from logging.handlers import RotatingFileHandler
 import time
 from datasets import load_dataset
 import numpy as np
+import pickle
+from torch_lr_finder import LRFinder
+import matplotlib.pyplot as plt
+import psutil
+import subprocess
+from datetime import datetime
+from torch.optim.swa_utils import AveragedModel, SWALR
+from config import config  # Import config
+import warnings
+
+# Suppress PIL EXIF warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='PIL')
+
+# Then environment variables and CUDA settings
+os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['TORCH_CUDA_ARCH_LIST'] = '7.0;7.5;8.0;8.6'
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+# Then CUDA optimizations
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.enabled = True
 
 # Add rotating file handler
 rotating_handler = RotatingFileHandler("training.log", maxBytes=5_000_000, backupCount=5)  # 5 MB per log
@@ -25,44 +47,71 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("training.log"),
+        RotatingFileHandler("training.log", maxBytes=5_000_000, backupCount=5),  # Combined into one handler
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
-logger.addHandler(rotating_handler)
 
 class ImageNetDataset(Dataset):
-    def __init__(self, transform=None, is_train=True):
+    def __init__(self, transform=None, is_train=True, split_dir='/home/ubuntu/imagenet_ec2/data/'):
         self.transform = transform
-        
-        # Load the ImageNet dataset from HuggingFace
-        logger.info("Loading ImageNet dataset from HuggingFace...")
-        self.dataset = load_dataset(
+        self.is_train = is_train
+        split_file = os.path.join(split_dir, 'train_indices.pkl' if is_train else 'val_indices.pkl')
+        dataset_split = 'train' if is_train else 'validation'
+
+        if not os.path.exists(split_dir):
+            os.makedirs(split_dir, exist_ok=True)
+
+        # Load dataset
+        logger.info(f"Loading {'training' if is_train else 'validation'} dataset...")
+        full_dataset = load_dataset(
             'imagenet-1k',
-            split='train' if is_train else 'validation',
+            split=dataset_split,
             cache_dir='/home/ubuntu/.cache/huggingface/datasets'
         )
-        
+
+        if os.path.exists(split_file):
+            logger.info(f"Loading saved split indices from {split_file}...")
+            with open(split_file, 'rb') as f:
+                indices = pickle.load(f)
+            self.dataset = full_dataset.select(indices)
+        else:
+            logger.info("Generating new split and saving indices...")
+            indices = list(range(len(full_dataset)))
+            with open(split_file, 'wb') as f:
+                pickle.dump(indices, f)
+            self.dataset = full_dataset
+
         logger.info(f"Dataset loaded with {len(self.dataset)} samples")
-        
+
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, idx):
-        # Get sample from the HuggingFace dataset
-        sample = self.dataset[idx]
-        
-        # Convert image from PIL to RGB if it's not already
-        image = sample['image']  # PIL Image
-        if image.mode != 'RGB':
-            image = image.convert('RGB')  # Add this line to ensure RGB
-        label = sample['label']
-        
-        if self.transform:
-            image = self.transform(image)
+        try:
+            sample = self.dataset[idx]
+            image = sample['image']  # PIL Image
+            label = sample['label']
+
+            # Ensure image is RGB
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+                
+            if self.transform:
+                image = self.transform(image)
+                
+            # Add debug check for tensor shape
+            if isinstance(image, torch.Tensor):
+                if image.shape[0] != 3:
+                    logger.error(f"Incorrect number of channels: {image.shape} at index {idx}")
+                    raise ValueError(f"Expected 3 channels, got {image.shape[0]}")
+                
+            return image, label
             
-        return image, label
+        except Exception as e:
+            logger.error(f"Error processing image at index {idx}: {str(e)}")
+            raise
 
 class Trainer:
     
@@ -77,47 +126,48 @@ class Trainer:
         self.start_epoch = 0
         self.best_acc = 0
 
-        # Data transforms
-        self.transform = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
+        # 1. Setup data first
+        self.setup_data()
+        logger.info("Data loaders initialized")
 
-        # Initialize model with 1000 classes for full ImageNet
+        # 2. Initialize model, criterion, and optimizer
         self.model = ImageNetModel(num_classes=1000, pretrained=True).to(self.device)
-
-        # Loss and optimizer with simple parameters
         self.criterion = nn.CrossEntropyLoss()
-        
-        # Initialize optimizer with all required parameters for SGD
-        self.optimizer = optim.SGD(
+        self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=config['learning_rate'],
-            momentum=0.9,
-            weight_decay=config['weight_decay'],
-            nesterov=True,
-            dampening=0  # Add dampening parameter
+            weight_decay=1e-4
         )
+        logger.info("Model, criterion, and optimizer initialized")
 
-        # Setup data first to get loader length
-        self.setup_data()
+        # 3. Load checkpoint - This will update model, optimizer, and epoch states
+        self.load_checkpoint()
+        logger.info(f"Starting from epoch {self.start_epoch}")
 
-        # Initialize schedulers
-        self.scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        # 4. Initialize scheduler with remaining steps
+        steps_per_epoch = len(self.train_loader)
+        remaining_epochs = config['epochs'] - self.start_epoch
+        total_steps = steps_per_epoch * remaining_epochs
+        
+        logger.info(f"Initializing OneCycleLR scheduler:")
+        logger.info(f"- Steps per epoch: {steps_per_epoch}")
+        logger.info(f"- Remaining epochs: {remaining_epochs}")
+        logger.info(f"- Total remaining steps: {total_steps}")
+        
+        if total_steps <= 0:
+            raise ValueError(f"No training steps remaining. Current epoch {self.start_epoch} >= max epochs {config['epochs']}")
+        
+        # Initialize OneCycleLR scheduler with remaining steps
+        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
             self.optimizer,
-            milestones=config['lr_schedule']['milestones'],
-            gamma=config['lr_schedule']['gamma']
+            max_lr=config['learning_rate'] * 5,
+            total_steps=total_steps,
+            pct_start=0.1,
+            div_factor=10,
+            final_div_factor=1e4,
+            anneal_strategy='cos'
         )
-
-        # Add warmup scheduler
-        self.warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-            self.optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=len(self.train_loader) * config['warmup_epochs']
-        )
+        logger.info("Scheduler initialized")
 
         # Initialize async checkpoint saving
         self.checkpoint_queue = asyncio.Queue()
@@ -127,9 +177,6 @@ class Trainer:
             daemon=True
         )
         self.checkpoint_worker.start()
-
-        # Load checkpoint if exists
-        self.load_checkpoint()
 
         # Training parameters
         self.grad_clip_value = 1.0
@@ -143,6 +190,32 @@ class Trainer:
         self.train_accs = []
         self.val_accs = []
         
+        self.plots_dir = os.path.join('/home/ubuntu/imagenet_ec2', 'plots')
+        os.makedirs(self.plots_dir, exist_ok=True)
+
+        # Add CUDA streams
+        self.compute_stream = torch.cuda.Stream()
+        self.transfer_stream = torch.cuda.Stream()
+
+        # Add CUDA warmup
+        if torch.cuda.is_available():
+            # Warmup CUDA
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            # Run a small warmup tensor operation
+            warmup = torch.randn(100, 100, device=self.device)
+            warmup = warmup @ warmup.t()  # Matrix multiplication
+            torch.cuda.synchronize()
+            del warmup
+
+        # Initialize SWA after 75% of training
+        self.swa_start = int(0.75 * config['epochs'])
+        self.swa_model = AveragedModel(self.model)
+        self.swa_scheduler = SWALR(
+            self.optimizer,
+            swa_lr=config['learning_rate'] * 0.1
+        )
+
     def _run_checkpoint_worker(self):
         """Run the checkpoint worker in its own thread with its own event loop"""
         asyncio.set_event_loop(self.loop)
@@ -170,10 +243,9 @@ class Trainer:
 
     def setup_data(self):
         train_transform = transforms.Compose([
+            transforms.Lambda(lambda x: x.convert('RGB')),  # Ensure RGB
             transforms.RandomResizedCrop(224),
             transforms.RandomHorizontalFlip(),
-            transforms.AutoAugment(transforms.AutoAugmentPolicy.IMAGENET),
-            transforms.RandAugment(num_ops=2, magnitude=9),
             transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
             transforms.RandomAffine(degrees=15, translate=(0.1, 0.1)),
             transforms.ToTensor(),
@@ -181,6 +253,7 @@ class Trainer:
         ])
         
         val_transform = transforms.Compose([
+            transforms.Lambda(lambda x: x.convert('RGB')),  # Ensure RGB
             transforms.Resize(256),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
@@ -204,7 +277,9 @@ class Trainer:
             shuffle=True,
             num_workers=self.config['num_workers'],
             pin_memory=True,
-            prefetch_factor=2
+            prefetch_factor=2,
+            persistent_workers=True,
+            drop_last=True
         )
         
         self.val_loader = DataLoader(
@@ -212,8 +287,9 @@ class Trainer:
             batch_size=self.config['batch_size'],
             shuffle=False,
             num_workers=self.config['num_workers'],
-            pin_memory=True,
-            prefetch_factor=2
+            pin_memory=self.config['pin_memory'],
+            prefetch_factor=self.config['prefetch_factor'],
+            persistent_workers=True
         )
 
 
@@ -222,144 +298,132 @@ class Trainer:
         total_loss = 0
         correct = 0
         total = 0
-        
-        # Initialize GradScaler for mixed precision training
-        scaler = GradScaler(
-            init_scale=2**16,
-            growth_factor=2,
-            backoff_factor=0.5,
-            growth_interval=2000
-        )
-        
-        # Improved progress tracking
-        running_loss = 0.0
-        running_correct = 0
-        running_total = 0
-        batch_start_time = time.time()
-        
-        logger.info("Starting training epoch with mixed precision...")
-        for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader)):
-            images = images.to(self.device, non_blocking=True)
-            labels = labels.to(self.device, non_blocking=True)
+        scaler = GradScaler()
+        start_time = time.time()
 
+        # Ensure model is on GPU
+        self.model = self.model.cuda()
+        torch.cuda.synchronize()
+        
+        # Set random seed for reproducibility
+        torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(42)
+        
+        for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader, 
+                                                         ncols=100, 
+                                                         desc="Training",
+                                                         miniters=100)):
+            # Move data to GPU
+            images = images.cuda(non_blocking=True)
+            labels = labels.cuda(non_blocking=True)
+            
+            # Forward pass and loss computation
             self.optimizer.zero_grad(set_to_none=True)
             
-            # Mixed precision forward pass - simplified autocast usage
-            with autocast():
+            with torch.amp.autocast(device_type='cuda'):
                 outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
 
-            # Mixed precision backward pass
+            # Backward pass
             scaler.scale(loss).backward()
-            
-            # Unscale before gradient clipping
             scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_value)
-            
-            # Step with scaler
             scaler.step(self.optimizer)
             scaler.update()
 
-            # Update metrics
-            total_loss += loss.item()
+            self.scheduler.step()
+
+            # Calculate batch accuracy
             _, predicted = outputs.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
-            
-            # Update running metrics
-            running_loss += loss.item()
-            running_correct += predicted.eq(labels).sum().item()
-            running_total += labels.size(0)
+            batch_acc = 100. * correct / total  # Calculate running accuracy
 
-            if batch_idx % 100 == 0:
-                # Calculate speed
-                batch_time = time.time() - batch_start_time
-                images_per_sec = (self.config['batch_size'] * 100) / batch_time if batch_idx > 0 else 0
-                
-                # Get current learning rate
-                current_lr = self.optimizer.param_groups[0]['lr']
-                
-                # Log detailed batch information
-                logger.info(f"\nBatch {batch_idx}/{len(self.train_loader)}:")
-                logger.info(f"  - Loss: {running_loss/100:.3f}")
-                logger.info(f"  - Accuracy: {100.*running_correct/running_total:.2f}%")
-                logger.info(f"  - Speed: {images_per_sec:.1f} img/s")
-                logger.info(f"  - LR: {current_lr:.6f}")
-                
-                # Reset running metrics
-                running_loss = 0.0
-                running_correct = 0
-                running_total = 0
-                batch_start_time = time.time()
-                
-                # Log GPU memory usage
-                if torch.cuda.is_available():
-                    gpu_memory_used = torch.cuda.memory_allocated() / 1024**2
-                    gpu_memory_total = torch.cuda.get_device_properties(0).total_memory / 1024**2
-                    gpu_utilization = torch.cuda.utilization()
-                    logger.info(f"GPU: {gpu_utilization}% | Memory: {gpu_memory_used:.1f}/{gpu_memory_total:.1f}MB | CUDA Allocated: {gpu_memory_used:.0f}MB")
+            # Update total loss
+            total_loss += loss.item()  # Add this back
 
-            # Clear cache periodically
-            if batch_idx % 500 == 0:
+            if batch_idx % 1000 == 0:
+                current_lr = self.scheduler.get_last_lr()[0]
+                current_speed = batch_idx * self.config['batch_size'] / (time.time() - start_time + 1e-8)
+                
+                # Add explicit accuracy logging
+                logger.info(
+                    f"\nBatch {batch_idx}/{len(self.train_loader)}:"
+                    f"\n  - Loss: {loss.item():.3f}"
+                    f"\n  - Accuracy: {batch_acc:.2f}%"
+                    f"\n  - Speed: {current_speed:.1f} img/s"
+                    f"\n  - LR: {current_lr:.6f}"
+                )
+                self.log_system_stats()
+
+            # Optional: Clear cache periodically (keep this at 1000 as well)
+            if batch_idx % 1000 == 0:
                 torch.cuda.empty_cache()
 
         return total_loss / len(self.train_loader), 100. * correct / total
     
     def validate(self):
         self.model.eval()
-        torch.cuda.empty_cache()
+        torch.cuda.empty_cache()  # Clear GPU cache before validation
         
         total_loss = 0
         correct = 0
         total = 0
-        top5_correct = 0
 
-        logger.info("Starting validation with mixed precision...")
-        with torch.no_grad(), autocast():
+        logger.info("Starting validation...")
+        with torch.no_grad():
             for batch_idx, (images, labels) in enumerate(tqdm(self.val_loader)):
-                images = images.to(self.device, non_blocking=True)
-                labels = labels.to(self.device, non_blocking=True)
-                
+                images, labels = images.to(self.device), labels.to(self.device)
                 outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
 
                 total_loss += loss.item()
-                _, predicted = outputs.topk(5, dim=1)
+                _, predicted = outputs.max(1)  # Only get top-1 prediction
                 total += labels.size(0)
-                correct += (predicted[:, 0] == labels).sum().item()
-                top5_correct += torch.sum(torch.any(predicted == labels.unsqueeze(1), dim=1)).item()
+                correct += predicted.eq(labels).sum().item()
 
                 if batch_idx % 100 == 0:
                     logger.info(f"Validation Progress: Batch {batch_idx}/{len(self.val_loader)}")
 
-        top5_acc = 100. * top5_correct / total
-        logger.info(f"Validation completed. Avg Loss = {total_loss / len(self.val_loader):.4f}, Top-1 Accuracy = {100. * correct / total:.2f}%, Top-5 Accuracy = {top5_acc:.2f}%")
-        torch.cuda.empty_cache()  # Add memory cleanup after validation
-        return total_loss / len(self.val_loader), 100. * correct / total
+        accuracy = 100. * correct / total
+        logger.info(f"Validation completed. Avg Loss = {total_loss / len(self.val_loader):.4f}, "
+                    f"Top-1 Accuracy = {accuracy:.2f}%")
+        
+        torch.cuda.empty_cache()
+        return total_loss / len(self.val_loader), accuracy
 
 
-
-    
-    def save_checkpoint(self, epoch, is_best=False):
+    def save_checkpoint(self, epoch, is_best=False, is_periodic=False):
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'best_acc': self.best_acc,
-            'config': self.config
+            'config': self.config,
+            'swa_model_state_dict': self.swa_model.state_dict() if epoch >= self.swa_start else None
         }
 
-        # Use the stored event loop
+        # Regular checkpoint
         checkpoint_path = os.path.join(self.config['checkpoint_dir'], 'last_checkpoint.pth')
         asyncio.run_coroutine_threadsafe(
             self.checkpoint_queue.put((checkpoint, checkpoint_path)), 
             self.loop
         )
 
+        # Best model checkpoint
         if is_best:
             best_path = os.path.join(self.config['checkpoint_dir'], 'best_model.pth')
             asyncio.run_coroutine_threadsafe(
                 self.checkpoint_queue.put((checkpoint, best_path)), 
+                self.loop
+            )
+        
+        # Periodic checkpoint every 10 epochs
+        if is_periodic:
+            periodic_path = os.path.join(self.config['checkpoint_dir'], f'checkpoint_epoch_{epoch}.pth')
+            asyncio.run_coroutine_threadsafe(
+                self.checkpoint_queue.put((checkpoint, periodic_path)), 
                 self.loop
             )
     
@@ -404,54 +468,71 @@ class Trainer:
                 logger.error(f"Failed to load checkpoint: {e}")
         else:
             logger.info("No existing checkpoint found. Starting training from scratch.")
+            self.start_epoch = 0
+            self.best_acc = 0
 
     
     def train(self):
+        total_start_time = time.time()
+        samples_processed = 0
+        
         logger.info(f"Training on device: {self.device}")
         logger.info(f"Training configuration: {self.config}")
         
         try:
             for epoch in range(self.start_epoch, self.config['epochs']):
+                epoch_start_time = time.time()
                 logger.info(f"Epoch: {epoch + 1}/{self.config['epochs']}")
                 
                 try:
-                    start_time = time.time()
-                    # Start training and validation
+                    # Training phase
                     train_loss, train_acc = self.train_epoch()
+                    
+                    # Validation phase
+                    logger.info("\nStarting validation phase...")
                     val_start_time = time.time()
                     val_loss, val_acc = self.validate()
                     val_time = time.time() - val_start_time
-                    epoch_time = time.time() - start_time
+                    epoch_time = time.time() - epoch_start_time
                     
-                    # Add the epoch summary log here
-                    logger.info(f"Epoch {epoch + 1} Summary: Train Loss = {train_loss:.4f}, "
-                              f"Train Acc = {train_acc:.2f}%, Val Loss = {val_loss:.4f}, "
-                              f"Val Acc = {val_acc:.2f}%, Epoch Time = {epoch_time:.2f}s, "
-                              f"Validation Time = {val_time:.2f}s")
+                    # Print detailed epoch summary
+                    logger.info(f"\nEpoch {epoch + 1} Summary:")
+                    logger.info(f"Training   - Loss: {train_loss:.4f}, Accuracy: {train_acc:.2f}%")
+                    logger.info(f"Validation - Loss: {val_loss:.4f}, Accuracy: {val_acc:.2f}%")
+                    logger.info(f"Times      - Epoch: {epoch_time:.2f}s, Validation: {val_time:.2f}s")
                     
-                    # Update learning rate schedulers
-                    if epoch < self.config['warmup_epochs']:
-                        self.warmup_scheduler.step()
-                    else:
-                        self.scheduler.step()
+                    # Save periodic checkpoint with actual epoch number
+                    if epoch % 10 == 0:
+                        self.save_checkpoint(epoch, is_best=False, is_periodic=True)
                     
                     # Store metrics and handle checkpoints
                     self._update_metrics(epoch, train_loss, val_loss, train_acc, val_acc)
+                    
+                    # Save best model if validation accuracy improves
+                    if val_acc > self.best_acc:
+                        self.best_acc = val_acc
+                        self.save_checkpoint(epoch, is_best=True)
+                        logger.info(f"New best validation accuracy: {val_acc:.2f}%")
                     
                 except KeyboardInterrupt:
                     logger.warning("\nTraining interrupted by user during epoch %d", epoch + 1)
                     self.save_checkpoint(epoch)
                     return
                 
-                if self.early_stopping_counter >= self.patience:
-                    logger.info(f"Early stopping triggered after {epoch + 1} epochs")
-                    break
+                # Log training speed stats
+                samples_processed += len(self.train_loader.dataset)
+                elapsed_time = time.time() - total_start_time
+                samples_per_second = samples_processed / elapsed_time
+                
+                logger.info(f"\nTraining Speed Stats:")
+                logger.info(f"Samples/second: {samples_per_second:.2f}")
+                logger.info(f"Time/epoch: {(time.time() - epoch_start_time) / 3600:.2f} hours")
+                logger.info(f"Estimated total time: {(self.config['epochs'] - epoch) * (time.time() - epoch_start_time) / 3600:.2f} hours")
                 
         except Exception as e:
             logger.error(f"Training failed with error: {e}")
             raise
         finally:
-            # Ensure cleanup happens
             try:
                 self.shutdown_worker()
                 torch.cuda.empty_cache()
@@ -464,9 +545,6 @@ class Trainer:
         self.val_losses.append(val_loss)
         self.train_accs.append(train_acc)
         self.val_accs.append(val_acc)
-        
-        # Remove the val_acc parameter
-        self.scheduler.step()  # Just call step() without parameters
         
         # Log learning rate
         current_lr = self.optimizer.param_groups[0]['lr']
@@ -483,43 +561,155 @@ class Trainer:
         else:
             self.early_stopping_counter += 1
 
+        # Plot progress after updating metrics
+        self.plot_training_progress()
+
+    def find_lr(self, num_iter=100):
+        """Find optimal learning rate using LR Finder"""
+        logger.info("Starting learning rate finder...")
+        
+        # Create a copy of the model for LR finding
+        model_copy = ImageNetModel(num_classes=1000, pretrained=True).to(self.device)
+        model_copy.load_state_dict(self.model.state_dict())
+        
+        optimizer = optim.Adam(
+            model_copy.parameters(),
+            lr=1e-7,  # Start with a very low learning rate
+            weight_decay=self.config['weight_decay']
+        )
+        
+        lr_finder = LRFinder(model_copy, optimizer, self.criterion, device=self.device)
+        
+        try:
+            lr_finder.range_test(
+                self.train_loader,
+                end_lr=10,  # End with a high learning rate
+                num_iter=num_iter,
+                step_mode="exp",
+                diverge_th=5,
+            )
+            
+            # Plot the learning rate finder results
+            fig, ax = plt.subplots(figsize=(10, 6))
+            lr_finder.plot()
+            plt.title('Learning Rate Finder Results')
+            plt.xlabel('Learning Rate')
+            plt.ylabel('Loss')
+            plt.grid(True)
+            
+            # Save the plot
+            plot_path = os.path.join(self.plots_dir, 'lr_finder.png')
+            plt.savefig(plot_path)
+            plt.close()
+            
+            # Get suggestion for learning rate
+            suggested_lr = lr_finder.suggestion()
+            logger.info(f"Suggested learning rate: {suggested_lr:.6f}")
+            
+            # Save learning rate history
+            history_path = os.path.join(self.plots_dir, 'lr_finder_history.txt')
+            with open(history_path, 'w') as f:
+                f.write(f"Suggested LR: {suggested_lr}\n")
+                f.write("History:\n")
+                for lr, loss in zip(lr_finder.history['lr'], lr_finder.history['loss']):
+                    f.write(f"LR: {lr:.8f}, Loss: {loss:.8f}\n")
+            
+            return suggested_lr
+            
+        except Exception as e:
+            logger.error(f"Error during LR finding: {e}")
+            raise
+        finally:
+            # Clean up
+            del model_copy
+            torch.cuda.empty_cache()
+
+    def plot_training_progress(self):
+        """Plot training and validation metrics"""
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12))
+        
+        # Plot losses
+        ax1.plot(self.train_losses, label='Train Loss')
+        ax1.plot(self.val_losses, label='Val Loss')
+        ax1.set_title('Training and Validation Loss')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Loss')
+        ax1.legend()
+        ax1.grid(True)
+        
+        # Plot accuracies
+        ax2.plot(self.train_accs, label='Train Acc')
+        ax2.plot(self.val_accs, label='Val Acc')
+        ax2.set_title('Training and Validation Accuracy')
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Accuracy (%)')
+        ax2.legend()
+        ax2.grid(True)
+        
+        plt.tight_layout()
+        plot_path = os.path.join(self.plots_dir, f'training_progress_epoch_{len(self.train_losses)}.png')
+        plt.savefig(plot_path)
+        plt.close()
+
+    def is_fresh_training(self):
+        """Check if this is a fresh training run"""
+        checkpoint_path = os.path.join(self.config['checkpoint_dir'], 'last_checkpoint.pth')
+        lr_finder_path = os.path.join(self.plots_dir, 'lr_finder.png')
+        return not (os.path.exists(checkpoint_path) or os.path.exists(lr_finder_path))
+
+    def log_system_stats(self):
+        try:
+            gpu_info = subprocess.check_output([
+                'nvidia-smi',
+                '--query-gpu=utilization.gpu,memory.used,memory.total',
+                '--format=csv,noheader,nounits'
+            ], encoding='utf-8')
+            
+            gpu_util, mem_used, mem_total = map(float, gpu_info.strip().split(','))
+            
+            logger.info(
+                f"GPU: {gpu_util}% | "
+                f"Memory: {mem_used}/{mem_total}MB | "
+                f"CUDA Allocated: {torch.cuda.memory_allocated()/1024**2:.0f}MB"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error logging stats: {e}")
+
 
 
 
 
 if __name__ == '__main__':
-    config = {
-        'checkpoint_dir': '/home/ubuntu/imagenet_ec2/checkpoints',
-        'batch_size': 256,
-        'learning_rate': 0.1,
-        'epochs': 100,
-        'num_workers': 8,
-        'checkpoint_frequency': 5,
-        'weight_decay': 1e-4,
-        'warmup_epochs': 5,
-        'grad_clip_value': 1.0,
-        'early_stopping_patience': 15,
-        'early_stopping_delta': 0.001,
-        'lr_schedule': {
-            'milestones': [30, 60, 90],
-            'gamma': 0.1
-        },
-        'prefetch_factor': 4,
-        'pin_memory': True,
-        'gradient_accumulation_steps': 4
-    }
-
     os.makedirs(config['checkpoint_dir'], exist_ok=True)
     trainer = None
     
     try:
         trainer = Trainer(config)
+        
+        # Check if this is a fresh training run
+        if trainer.is_fresh_training():
+            logger.info("Fresh training detected. Running learning rate finder...")
+            try:
+                suggested_lr = trainer.find_lr(num_iter=100)
+                config['learning_rate'] = suggested_lr
+                logger.info(f"Using suggested learning rate: {suggested_lr}")
+                
+                # Reinitialize trainer with new learning rate
+                del trainer
+                torch.cuda.empty_cache()
+                trainer = Trainer(config)
+            except Exception as e:
+                logger.error(f"LR finder failed: {e}. Using default learning rate.")
+        else:
+            logger.info("Resuming training from checkpoint. Skipping LR finder.")
+        
         trainer.train()
     except KeyboardInterrupt:
         logger.warning("\nTraining interrupted by user. Starting cleanup...")
     except Exception as e:
         logger.error(f"An error occurred: {e}")
-        logger.exception("Exception details:")  # This will print the full traceback
+        logger.exception("Exception details:")
     finally:
         if trainer is not None:
             try:
