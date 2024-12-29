@@ -1,7 +1,7 @@
 config = {
     'checkpoint_dir': '/home/ubuntu/imagenet_ec2/checkpoints',
     'batch_size': 256,
-    'learning_rate': 0.001,  # Reduced base learning rate
+    'learning_rate': 0.0005,  # Reduce from 0.001
     'epochs': 100,  # Increased from 30 to 100
     'num_workers': 8,
     'checkpoint_frequency': 5,
