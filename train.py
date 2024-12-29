@@ -298,6 +298,7 @@ class Trainer:
         total_loss = 0
         correct = 0
         total = 0
+        start_time = time.time()
         
         # Fix GradScaler initialization - remove 'cuda' parameter
         scaler = GradScaler()  # Revert to simple initialization
@@ -332,6 +333,21 @@ class Trainer:
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
             total_loss += loss.item()
+
+            # Add back the logging
+            if batch_idx % 1000 == 0:
+                current_lr = self.scheduler.get_last_lr()[0]
+                current_speed = batch_idx * self.config['batch_size'] / (time.time() - start_time + 1e-8)
+                batch_acc = 100. * correct / total if total > 0 else 0.0
+                
+                logger.info(
+                    f"\nBatch {batch_idx}/{len(self.train_loader)}:"
+                    f"\n  - Loss: {loss.item():.3f}"
+                    f"\n  - Accuracy: {batch_acc:.2f}%"
+                    f"\n  - Speed: {current_speed:.1f} img/s"
+                    f"\n  - LR: {current_lr:.6f}"
+                )
+                self.log_system_stats()
 
         return total_loss / len(self.train_loader), 100. * correct / total
     
