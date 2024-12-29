@@ -298,7 +298,9 @@ class Trainer:
         total_loss = 0
         correct = 0
         total = 0
-        scaler = GradScaler()
+        
+        # Fix GradScaler initialization
+        scaler = GradScaler('cuda')  # Updated to new format
         
         for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader)):
             # Move data to GPU
@@ -313,19 +315,17 @@ class Trainer:
                 outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
 
-            # Backward pass
+            # Backward pass and optimization
             scaler.scale(loss).backward()
-            
-            # Unscale gradients
             scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_value)
             
-            # Optimizer step
-            scaler.step(self.optimizer)  # 1. Optimizer step FIRST
+            # Important: Move scheduler.step() after optimizer steps
+            optimizer_skipped = not scaler.step(self.optimizer)  # Returns True if step was skipped
             scaler.update()
             
-            # Scheduler step
-            self.scheduler.step()        # 2. Scheduler step SECOND
+            if not optimizer_skipped:
+                self.scheduler.step()
 
             # Calculate metrics
             _, predicted = outputs.max(1)
