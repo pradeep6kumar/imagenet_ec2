@@ -299,8 +299,8 @@ class Trainer:
         correct = 0
         total = 0
         
-        # Fix GradScaler initialization
-        scaler = GradScaler('cuda')  # Updated to new format
+        # Fix GradScaler initialization - remove 'cuda' parameter
+        scaler = GradScaler()  # Revert to simple initialization
         
         for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader)):
             # Move data to GPU
@@ -321,7 +321,7 @@ class Trainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_value)
             
             # Important: Move scheduler.step() after optimizer steps
-            optimizer_skipped = not scaler.step(self.optimizer)  # Returns True if step was skipped
+            optimizer_skipped = not scaler.step(self.optimizer)
             scaler.update()
             
             if not optimizer_skipped:
