@@ -329,9 +329,9 @@ class Trainer:
             scaler.scale(loss).backward()
             scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_value)
-            scaler.step(self.optimizer)
+            scaler.step(self.optimizer)  # 1. Optimizer step first
             scaler.update()
-            self.scheduler.step()
+            self.scheduler.step()        # 2. Scheduler step second
 
             # Calculate batch accuracy
             _, predicted = outputs.max(1)
