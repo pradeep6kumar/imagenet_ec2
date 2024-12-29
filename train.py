@@ -299,66 +299,39 @@ class Trainer:
         correct = 0
         total = 0
         scaler = GradScaler()
-        start_time = time.time()
-
-        # Ensure model is on GPU
-        self.model = self.model.cuda()
-        torch.cuda.synchronize()
         
-        # Set random seed for reproducibility
-        torch.manual_seed(42)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(42)
-        
-        for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader, 
-                                                         ncols=100, 
-                                                         desc="Training",
-                                                         miniters=100)):
+        for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader)):
             # Move data to GPU
             images = images.cuda(non_blocking=True)
             labels = labels.cuda(non_blocking=True)
             
-            # Forward pass and loss computation
+            # Zero gradients
             self.optimizer.zero_grad(set_to_none=True)
             
+            # Forward pass
             with torch.amp.autocast(device_type='cuda'):
                 outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
 
             # Backward pass
             scaler.scale(loss).backward()
+            
+            # Unscale gradients
             scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_value)
-            scaler.step(self.optimizer)  # 1. Optimizer step first
+            
+            # Optimizer step
+            scaler.step(self.optimizer)  # 1. Optimizer step FIRST
             scaler.update()
-            self.scheduler.step()        # 2. Scheduler step second
+            
+            # Scheduler step
+            self.scheduler.step()        # 2. Scheduler step SECOND
 
-            # Calculate batch accuracy
+            # Calculate metrics
             _, predicted = outputs.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
-            batch_acc = 100. * correct / total  # Calculate running accuracy
-
-            # Update total loss
-            total_loss += loss.item()  # Add this back
-
-            if batch_idx % 1000 == 0:
-                current_lr = self.scheduler.get_last_lr()[0]
-                current_speed = batch_idx * self.config['batch_size'] / (time.time() - start_time + 1e-8)
-                
-                # Add explicit accuracy logging
-                logger.info(
-                    f"\nBatch {batch_idx}/{len(self.train_loader)}:"
-                    f"\n  - Loss: {loss.item():.3f}"
-                    f"\n  - Accuracy: {batch_acc:.2f}%"
-                    f"\n  - Speed: {current_speed:.1f} img/s"
-                    f"\n  - LR: {current_lr:.6f}"
-                )
-                self.log_system_stats()
-
-            # Optional: Clear cache periodically (keep this at 1000 as well)
-            if batch_idx % 1000 == 0:
-                torch.cuda.empty_cache()
+            total_loss += loss.item()
 
         return total_loss / len(self.train_loader), 100. * correct / total
     
