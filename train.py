@@ -573,9 +573,9 @@ class Trainer:
         # Use smaller batch size for LR finder
         temp_loader = DataLoader(
             self.train_dataset,
-            batch_size=64,  # Reduced from 256
+            batch_size=64,
             shuffle=True,
-            num_workers=4,  # Reduced from 8
+            num_workers=4,
             pin_memory=True
         )
         
@@ -585,7 +585,7 @@ class Trainer:
         
         optimizer = optim.Adam(
             model_copy.parameters(),
-            lr=1e-7,  # Start with a very low learning rate
+            lr=1e-7,
             weight_decay=self.config['weight_decay']
         )
         
@@ -594,36 +594,20 @@ class Trainer:
         try:
             lr_finder.range_test(
                 temp_loader,
-                end_lr=10,  # End with a high learning rate
+                end_lr=10,
                 num_iter=num_iter,
                 step_mode="exp",
                 diverge_th=5,
             )
             
-            # Plot the learning rate finder results
-            fig, ax = plt.subplots(figsize=(10, 6))
-            lr_finder.plot()
-            plt.title('Learning Rate Finder Results')
-            plt.xlabel('Learning Rate')
-            plt.ylabel('Loss')
-            plt.grid(True)
-            
-            # Save the plot
-            plot_path = os.path.join(self.plots_dir, 'lr_finder.png')
-            plt.savefig(plot_path)
-            plt.close()
-            
-            # Get suggestion for learning rate
-            suggested_lr = lr_finder.suggestion()
+            # Get the learning rate with steepest gradient
+            suggested_lr = lr_finder.history['lr'][lr_finder.history['loss'].index(min(lr_finder.history['loss']))]
             logger.info(f"Suggested learning rate: {suggested_lr:.6f}")
             
-            # Save learning rate history
-            history_path = os.path.join(self.plots_dir, 'lr_finder_history.txt')
-            with open(history_path, 'w') as f:
-                f.write(f"Suggested LR: {suggested_lr}\n")
-                f.write("History:\n")
-                for lr, loss in zip(lr_finder.history['lr'], lr_finder.history['loss']):
-                    f.write(f"LR: {lr:.8f}, Loss: {loss:.8f}\n")
+            # Plot results
+            lr_finder.plot()
+            plt.savefig(os.path.join(self.plots_dir, 'lr_finder.png'))
+            plt.close()
             
             return suggested_lr
             
@@ -631,7 +615,6 @@ class Trainer:
             logger.error(f"Error during LR finding: {e}")
             raise
         finally:
-            # Clean up
             del model_copy
             torch.cuda.empty_cache()
 
