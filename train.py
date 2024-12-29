@@ -331,7 +331,6 @@ class Trainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_value)
             scaler.step(self.optimizer)
             scaler.update()
-
             self.scheduler.step()
 
             # Calculate batch accuracy
@@ -568,6 +567,18 @@ class Trainer:
         """Find optimal learning rate using LR Finder"""
         logger.info("Starting learning rate finder...")
         
+        # Clear cache before starting
+        torch.cuda.empty_cache()
+        
+        # Use smaller batch size for LR finder
+        temp_loader = DataLoader(
+            self.train_dataset,
+            batch_size=64,  # Reduced from 256
+            shuffle=True,
+            num_workers=4,  # Reduced from 8
+            pin_memory=True
+        )
+        
         # Create a copy of the model for LR finding
         model_copy = ImageNetModel(num_classes=1000, pretrained=True).to(self.device)
         model_copy.load_state_dict(self.model.state_dict())
@@ -582,7 +593,7 @@ class Trainer:
         
         try:
             lr_finder.range_test(
-                self.train_loader,
+                temp_loader,
                 end_lr=10,  # End with a high learning rate
                 num_iter=num_iter,
                 step_mode="exp",
