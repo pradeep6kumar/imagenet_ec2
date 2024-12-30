@@ -208,13 +208,20 @@ class Trainer:
             torch.cuda.synchronize()
             del warmup
 
-        # Initialize SWA after 75% of training
-        self.swa_start = 32  # Start after current epoch
+        # Initialize SWA
+        self.swa_start = 32
         self.swa_model = AveragedModel(self.model)
         self.swa_scheduler = SWALR(
             self.optimizer,
             swa_lr=config['learning_rate'] * 0.1
         )
+        
+        # Check if we should start with SWA active
+        if self.start_epoch >= self.swa_start:
+            logger.info(f"Resuming with SWA active")
+            self.swa_activated = True
+            self.scheduler = self.swa_scheduler
+            self.optimizer.param_groups[0]['lr'] = config['learning_rate'] * 0.1
 
     def _run_checkpoint_worker(self):
         """Run the checkpoint worker in its own thread with its own event loop"""
