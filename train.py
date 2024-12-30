@@ -209,7 +209,7 @@ class Trainer:
             del warmup
 
         # Initialize SWA after 75% of training
-        self.swa_start = 32  # Start after current epoch
+        self.swa_start = 31  # Start after current epoch
         self.swa_model = AveragedModel(self.model)
         self.swa_scheduler = SWALR(
             self.optimizer,
