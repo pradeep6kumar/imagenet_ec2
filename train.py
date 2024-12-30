@@ -218,10 +218,11 @@ class Trainer:
         
         # Check if we should start with SWA active
         if self.start_epoch >= self.swa_start:
-            logger.info(f"Resuming with SWA active")
+            logger.info(f"Resuming with SWA active (epoch {self.start_epoch} >= {self.swa_start})")
             self.swa_activated = True
             self.scheduler = self.swa_scheduler
             self.optimizer.param_groups[0]['lr'] = config['learning_rate'] * 0.1
+            logger.info(f"Set SWA learning rate to {self.optimizer.param_groups[0]['lr']:.6f}")
 
     def _run_checkpoint_worker(self):
         """Run the checkpoint worker in its own thread with its own event loop"""
@@ -486,10 +487,12 @@ class Trainer:
                 
                 # Check if we should activate SWA now
                 if epoch >= self.swa_start and not hasattr(self, 'swa_activated'):
-                    logger.info(f"Epoch {epoch}: Activating SWA")
+                    logger.info(f"Epoch {epoch}: Activating SWA (swa_start={self.swa_start})")
                     self.swa_model.update_parameters(self.model)
                     self.scheduler = self.swa_scheduler
+                    old_lr = self.optimizer.param_groups[0]['lr']
                     self.optimizer.param_groups[0]['lr'] = config['learning_rate'] * 0.1
+                    logger.info(f"Changed LR from {old_lr:.6f} to {self.optimizer.param_groups[0]['lr']:.6f}")
                     self.swa_activated = True  # Mark as activated
                 
                 epoch_start_time = time.time()
