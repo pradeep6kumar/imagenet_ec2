@@ -209,7 +209,7 @@ class Trainer:
             del warmup
 
         # Initialize SWA after 75% of training
-        self.swa_start = int(0.75 * config['epochs'])
+        self.swa_start = 32  # Start after current epoch
         self.swa_model = AveragedModel(self.model)
         self.swa_scheduler = SWALR(
             self.optimizer,
@@ -326,7 +326,10 @@ class Trainer:
             scaler.update()
             
             if not optimizer_skipped:
-                self.scheduler.step()
+                if hasattr(self, 'current_epoch') and self.current_epoch >= self.swa_start:
+                    self.swa_scheduler.step()
+                else:
+                    self.scheduler.step()
 
             # Calculate metrics
             _, predicted = outputs.max(1)
@@ -469,6 +472,14 @@ class Trainer:
         
         try:
             for epoch in range(self.start_epoch, self.config['epochs']):
+                self.current_epoch = epoch  # Add this line
+                
+                # Add SWA activation check
+                if epoch == self.swa_start:
+                    logger.info(f"Epoch {epoch}: Activating SWA")
+                    self.swa_model.update_parameters(self.model)
+                    self.scheduler = self.swa_scheduler
+                
                 epoch_start_time = time.time()
                 logger.info(f"Epoch: {epoch + 1}/{self.config['epochs']}")
                 
