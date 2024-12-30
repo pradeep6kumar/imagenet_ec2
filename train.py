@@ -484,6 +484,7 @@ class Trainer:
         try:
             for epoch in range(self.start_epoch, self.config['epochs']):
                 self.current_epoch = epoch
+                logger.info(f"Current epoch {epoch}, swa_start {self.swa_start}, swa_activated: {hasattr(self, 'swa_activated')}")
                 
                 # Check if we should activate SWA now
                 if epoch >= self.swa_start and not hasattr(self, 'swa_activated'):
