@@ -209,7 +209,7 @@ class Trainer:
             del warmup
 
         # Initialize SWA after 75% of training
-        self.swa_start = 31  # Start after current epoch
+        self.swa_start = 32  # Start after current epoch
         self.swa_model = AveragedModel(self.model)
         self.swa_scheduler = SWALR(
             self.optimizer,
@@ -328,6 +328,9 @@ class Trainer:
             if not optimizer_skipped:
                 if hasattr(self, 'current_epoch') and self.current_epoch >= self.swa_start:
                     self.swa_scheduler.step()
+                    # Add logging to verify LR change
+                    if batch_idx % 1000 == 0:
+                        logger.info(f"SWA Learning rate: {self.optimizer.param_groups[0]['lr']:.6f}")
                 else:
                     self.scheduler.step()
 
@@ -479,6 +482,7 @@ class Trainer:
                     logger.info(f"Epoch {epoch}: Activating SWA")
                     self.swa_model.update_parameters(self.model)
                     self.scheduler = self.swa_scheduler
+                    self.optimizer.param_groups[0]['lr'] = config['learning_rate'] * 0.1
                 
                 epoch_start_time = time.time()
                 logger.info(f"Epoch: {epoch + 1}/{self.config['epochs']}")
