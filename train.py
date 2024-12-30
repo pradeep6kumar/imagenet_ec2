@@ -475,14 +475,15 @@ class Trainer:
         
         try:
             for epoch in range(self.start_epoch, self.config['epochs']):
-                self.current_epoch = epoch  # Add this line
+                self.current_epoch = epoch
                 
-                # Add SWA activation check
-                if epoch == self.swa_start:
+                # Check if we should activate SWA now
+                if epoch >= self.swa_start and not hasattr(self, 'swa_activated'):
                     logger.info(f"Epoch {epoch}: Activating SWA")
                     self.swa_model.update_parameters(self.model)
                     self.scheduler = self.swa_scheduler
                     self.optimizer.param_groups[0]['lr'] = config['learning_rate'] * 0.1
+                    self.swa_activated = True  # Mark as activated
                 
                 epoch_start_time = time.time()
                 logger.info(f"Epoch: {epoch + 1}/{self.config['epochs']}")
