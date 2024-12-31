@@ -213,7 +213,8 @@ class Trainer:
         self.swa_model = AveragedModel(self.model)
         self.swa_scheduler = SWALR(
             self.optimizer,
-            swa_lr=config['learning_rate'] * 0.1
+            swa_lr=config['learning_rate'] * 0.1,
+            anneal_epochs=5  # Add cycling to help escape plateau
         )
         
         # Check if we should start with SWA active
@@ -350,7 +351,7 @@ class Trainer:
 
             # Add back the logging
             if batch_idx % 1000 == 0:
-                current_lr = self.scheduler.get_last_lr()[0]
+                current_lr = self.optimizer.param_groups[0]['lr']
                 current_speed = batch_idx * self.config['batch_size'] / (time.time() - start_time + 1e-8)
                 batch_acc = 100. * correct / total if total > 0 else 0.0
                 
