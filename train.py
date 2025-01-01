@@ -133,13 +133,20 @@ class Trainer:
         # 2. Initialize model, criterion, and optimizer
         self.model = ImageNetModel(num_classes=1000, pretrained=True).to(self.device)
         self.criterion = nn.CrossEntropyLoss()
+
+        # Alternative initialization with parameter dictionary
+        optimizer_params = {
+            'lr': config['learning_rate'],
+            'momentum': 0.9,
+            'dampening': 0,
+            'weight_decay': 1e-4,
+            'nesterov': True,
+            'maximize': False
+        }
+
         self.optimizer = optim.SGD(
             self.model.parameters(),
-            lr=config['learning_rate'],
-            momentum=0.9,
-            weight_decay=1e-4,
-            nesterov=True,
-            dampening=0
+            **optimizer_params
         )
         logger.info("Model, criterion, and optimizer initialized")
 
