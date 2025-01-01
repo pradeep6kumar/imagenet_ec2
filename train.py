@@ -146,7 +146,9 @@ class Trainer:
 
         self.optimizer = optim.SGD(
             self.model.parameters(),
-            **optimizer_params
+            lr=config['learning_rate'],
+            momentum=0.9,
+            weight_decay=1e-4
         )
         logger.info("Model, criterion, and optimizer initialized")
 
