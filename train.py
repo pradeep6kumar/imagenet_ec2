@@ -133,10 +133,12 @@ class Trainer:
         # 2. Initialize model, criterion, and optimizer
         self.model = ImageNetModel(num_classes=1000, pretrained=True).to(self.device)
         self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = optim.Adam(
+        self.optimizer = optim.SGD(
             self.model.parameters(),
             lr=config['learning_rate'],
-            weight_decay=1e-4
+            momentum=0.9,  # Standard momentum for ImageNet
+            weight_decay=1e-4,
+            nesterov=True  # Enable Nesterov momentum
         )
         logger.info("Model, criterion, and optimizer initialized")
 
@@ -213,8 +215,8 @@ class Trainer:
         self.swa_model = AveragedModel(self.model)
         self.swa_scheduler = SWALR(
             self.optimizer,
-            swa_lr=config['learning_rate'] * 0.1,
-            anneal_epochs=5  # Add cycling to help escape plateau
+            swa_lr=config['learning_rate'] * 0.1,  # Keep the same ratio
+            anneal_epochs=5
         )
         
         # Check if we should start with SWA active
