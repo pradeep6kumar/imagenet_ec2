@@ -311,8 +311,8 @@ class Trainer:
         total = 0
         start_time = time.time()
         
-        # Update GradScaler
-        scaler = GradScaler(device='cuda')  # Fix the deprecation warning
+        # Fix GradScaler initialization
+        scaler = GradScaler()  # Remove device parameter
         
         for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader)):
             # Move data to GPU
