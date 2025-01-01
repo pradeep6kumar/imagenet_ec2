@@ -1,7 +1,7 @@
 config = {
     'checkpoint_dir': '/home/ubuntu/imagenet_ec2/checkpoints',
     'batch_size': 256,
-    'learning_rate': 0.1,  # Higher initial LR for SGD
+    'learning_rate': 0.0005,  # Revert to original learning rate
     'epochs': 100,  # Increased from 30 to 100
     'num_workers': 8,
     'checkpoint_frequency': 5,

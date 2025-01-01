@@ -215,8 +215,8 @@ class Trainer:
         self.swa_model = AveragedModel(self.model)
         self.swa_scheduler = SWALR(
             self.optimizer,
-            swa_lr=config['learning_rate'] * 0.2,  # More aggressive (0.2 instead of 0.1)
-            anneal_epochs=5  # Keep the same cycling period
+            swa_lr=config['learning_rate'] * 0.1,
+            anneal_epochs=5
         )
         
         # Check if we should start with SWA active
@@ -224,7 +224,7 @@ class Trainer:
             logger.info(f"Resuming with SWA active (epoch {self.start_epoch} >= {self.swa_start})")
             self.swa_activated = True
             self.scheduler = self.swa_scheduler
-            self.optimizer.param_groups[0]['lr'] = config['learning_rate'] * 0.2  # Match SWA LR
+            self.optimizer.param_groups[0]['lr'] = config['learning_rate'] * 0.1
             logger.info(f"Set SWA learning rate to {self.optimizer.param_groups[0]['lr']:.6f}")
 
     def _run_checkpoint_worker(self):
@@ -495,7 +495,7 @@ class Trainer:
                     self.swa_model.update_parameters(self.model)
                     self.scheduler = self.swa_scheduler
                     old_lr = self.optimizer.param_groups[0]['lr']
-                    self.optimizer.param_groups[0]['lr'] = config['learning_rate'] * 0.2  # Match SWA LR
+                    self.optimizer.param_groups[0]['lr'] = config['learning_rate'] * 0.1
                     logger.info(f"Changed LR from {old_lr:.6f} to {self.optimizer.param_groups[0]['lr']:.6f}")
                     self.swa_activated = True  # Mark as activated
                 
