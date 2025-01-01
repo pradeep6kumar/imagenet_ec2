@@ -136,9 +136,10 @@ class Trainer:
         self.optimizer = optim.SGD(
             self.model.parameters(),
             lr=config['learning_rate'],
-            momentum=0.9,  # Standard momentum for ImageNet
+            momentum=0.9,
             weight_decay=1e-4,
-            nesterov=True  # Enable Nesterov momentum
+            nesterov=True,
+            dampening=0
         )
         logger.info("Model, criterion, and optimizer initialized")
 
