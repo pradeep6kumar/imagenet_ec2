@@ -135,11 +135,9 @@ class Trainer:
         self.criterion = nn.CrossEntropyLoss()
 
         # Clean SGD initialization with default dampening
-        self.optimizer = optim.SGD(
+        self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=config['learning_rate'],
-            momentum=0.9,
-            dampening=0,
             weight_decay=1e-4
         )
         logger.info("Model, criterion, and optimizer initialized")
@@ -217,8 +215,8 @@ class Trainer:
         self.swa_model = AveragedModel(self.model)
         self.swa_scheduler = SWALR(
             self.optimizer,
-            swa_lr=config['learning_rate'] * 0.1,  # Keep the same ratio
-            anneal_epochs=5
+            swa_lr=config['learning_rate'] * 0.2,  # More aggressive (0.2 instead of 0.1)
+            anneal_epochs=5  # Keep the same cycling period
         )
         
         # Check if we should start with SWA active
@@ -226,7 +224,7 @@ class Trainer:
             logger.info(f"Resuming with SWA active (epoch {self.start_epoch} >= {self.swa_start})")
             self.swa_activated = True
             self.scheduler = self.swa_scheduler
-            self.optimizer.param_groups[0]['lr'] = config['learning_rate'] * 0.1
+            self.optimizer.param_groups[0]['lr'] = config['learning_rate'] * 0.2  # Match SWA LR
             logger.info(f"Set SWA learning rate to {self.optimizer.param_groups[0]['lr']:.6f}")
 
     def _run_checkpoint_worker(self):
@@ -313,8 +311,8 @@ class Trainer:
         total = 0
         start_time = time.time()
         
-        # Fix GradScaler initialization - remove 'cuda' parameter
-        scaler = GradScaler()  # Revert to simple initialization
+        # Update GradScaler
+        scaler = GradScaler(device='cuda')  # Fix the deprecation warning
         
         for batch_idx, (images, labels) in enumerate(tqdm(self.train_loader)):
             # Move data to GPU
@@ -497,7 +495,7 @@ class Trainer:
                     self.swa_model.update_parameters(self.model)
                     self.scheduler = self.swa_scheduler
                     old_lr = self.optimizer.param_groups[0]['lr']
-                    self.optimizer.param_groups[0]['lr'] = config['learning_rate'] * 0.1
+                    self.optimizer.param_groups[0]['lr'] = config['learning_rate'] * 0.2  # Match SWA LR
                     logger.info(f"Changed LR from {old_lr:.6f} to {self.optimizer.param_groups[0]['lr']:.6f}")
                     self.swa_activated = True  # Mark as activated
                 
